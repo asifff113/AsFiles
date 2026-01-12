@@ -147,7 +147,8 @@ export const ActivePanel = ({ tool }: ActivePanelProps) => {
     });
 
     try {
-      const response = await fetch(tool.config.endpoint, {
+      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      const response = await fetch(`${apiUrl}${tool.config.endpoint}`, {
         method: tool.config.method,
         body: formData,
       });
