@@ -7,7 +7,7 @@ import { ActivePanel } from './components/ActivePanel';
 import './App.css';
 
 function App() {
-  const [activeToolId, setActiveToolId] = useState<string | null>("merge-pptx");
+  const [activeToolId, setActiveToolId] = useState<string | null>(null);
   const [filter, setFilter] = useState<ToolCategory | 'all'>('all');
   const [search, setSearch] = useState('');
 

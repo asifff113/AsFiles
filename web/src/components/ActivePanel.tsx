@@ -74,6 +74,7 @@ export const ActivePanel = ({ tool }: ActivePanelProps) => {
   const [formValues, setFormValues] = useState<Record<string, any>>({});
   const [aiResult, setAiResult] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [outputFileName, setOutputFileName] = useState<string>("");
 
   // Check if this is an AI tool
   const isAITool = tool.category === "ai";
@@ -93,6 +94,7 @@ export const ActivePanel = ({ tool }: ActivePanelProps) => {
     setDownloadUrl(null);
     setAiResult(null);
     setCopied(false);
+    setOutputFileName("");
     if (tool.config?.formFields) {
       const initial: Record<string, any> = {};
       tool.config.formFields.forEach(f => initial[f.name] = f.defaultValue);
@@ -194,6 +196,20 @@ export const ActivePanel = ({ tool }: ActivePanelProps) => {
         const blob = await response.blob();
         const url = URL.createObjectURL(blob);
         setDownloadUrl(url);
+        
+        // Generate output filename based on uploaded file
+        const outputExt = tool.config.outputFileName.split('.').pop() || 'pdf';
+        if (files.length === 1) {
+          // Single file: use original name with new extension
+          const baseName = files[0].name.replace(/\.[^/.]+$/, '');
+          setOutputFileName(`${baseName}.${outputExt}`);
+        } else if (files.length > 1) {
+          // Multiple files: use first file name + merged/combined
+          const baseName = files[0].name.replace(/\.[^/.]+$/, '');
+          setOutputFileName(`${baseName}_merged.${outputExt}`);
+        } else {
+          setOutputFileName(tool.config.outputFileName);
+        }
         setStatus("success");
       }
     } catch (err: any) {
@@ -320,7 +336,7 @@ export const ActivePanel = ({ tool }: ActivePanelProps) => {
             {downloadUrl && !isAITool && (
                 <a
                     href={downloadUrl}
-                    download={tool.config.outputFileName}
+                    download={outputFileName || tool.config.outputFileName}
                     className="flex-1"
                 >
                     <Button type="button" variant="success" size="lg" className="w-full animate-bounce-subtle">
