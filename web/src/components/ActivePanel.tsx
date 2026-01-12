@@ -119,9 +119,36 @@ export const ActivePanel = ({ tool }: ActivePanelProps) => {
     setStatus("idle");
   }, [tool.config]);
 
+  // Map file extensions to MIME types
+  const getMimeTypes = (extensions: string[]) => {
+    const mimeMap: Record<string, string[]> = {
+      '.pdf': ['application/pdf'],
+      '.pptx': ['application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+      '.ppt': ['application/vnd.ms-powerpoint'],
+      '.docx': ['application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+      '.doc': ['application/msword'],
+      '.xlsx': ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+      '.xls': ['application/vnd.ms-excel'],
+      '.jpg': ['image/jpeg'],
+      '.jpeg': ['image/jpeg'],
+      '.png': ['image/png'],
+      '.gif': ['image/gif'],
+      '.bmp': ['image/bmp'],
+      '.webp': ['image/webp'],
+    };
+    
+    const result: Record<string, string[]> = {};
+    extensions.forEach(ext => {
+      if (mimeMap[ext]) {
+        result[mimeMap[ext][0]] = [ext];
+      }
+    });
+    return result;
+  };
+
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    accept: tool.config?.acceptedFiles.reduce((acc, curr) => ({ ...acc, [curr === '.jpg' ? 'image/jpeg' : curr === '.pdf' ? 'application/pdf' : 'application/octet-stream']: [] }), {}),
+    accept: tool.config?.acceptedFiles ? getMimeTypes(tool.config.acceptedFiles) : undefined,
     multiple: tool.config?.multiFile
   });
 
