@@ -201,11 +201,11 @@ export const ActivePanel = ({ tool }: ActivePanelProps) => {
         const outputExt = tool.config.outputFileName.split('.').pop() || 'pdf';
         if (files.length === 1) {
           // Single file: use original name with new extension
-          const baseName = files[0].name.replace(/\.[^/.]+$/, '');
+          const baseName = files[0].file.name.replace(/\.[^/.]+$/, '');
           setOutputFileName(`${baseName}.${outputExt}`);
         } else if (files.length > 1) {
           // Multiple files: use first file name + merged/combined
-          const baseName = files[0].name.replace(/\.[^/.]+$/, '');
+          const baseName = files[0].file.name.replace(/\.[^/.]+$/, '');
           setOutputFileName(`${baseName}_merged.${outputExt}`);
         } else {
           setOutputFileName(tool.config.outputFileName);
