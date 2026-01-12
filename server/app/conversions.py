@@ -498,9 +498,112 @@ class PowerPointToPDFConverter:
     @staticmethod
     def convert(buffer: bytes) -> bytes:
         """
-        Convert PowerPoint to PDF.
-        Creates a PDF with each slide as a page.
+        Convert PowerPoint to PDF using Microsoft PowerPoint (Windows) or fallback.
         """
+        import platform
+        import subprocess
+        
+        # On Windows, try to use PowerPoint COM for accurate conversion
+        if platform.system() == "Windows":
+            try:
+                return PowerPointToPDFConverter._convert_with_com(buffer)
+            except Exception as e:
+                print(f"COM conversion failed: {e}, trying LibreOffice...")
+                pass
+        
+        # Try LibreOffice as fallback
+        try:
+            return PowerPointToPDFConverter._convert_with_libreoffice(buffer)
+        except Exception:
+            pass
+        
+        # Final fallback: basic text extraction
+        return PowerPointToPDFConverter._convert_basic(buffer)
+    
+    @staticmethod
+    def _convert_with_com(buffer: bytes) -> bytes:
+        """Convert using Microsoft PowerPoint COM (Windows only)."""
+        import tempfile
+        import os
+        
+        try:
+            import comtypes.client
+        except ImportError:
+            raise ConversionError("comtypes not available")
+        
+        # Save to temp file
+        with tempfile.NamedTemporaryFile(suffix='.pptx', delete=False) as tmp_pptx:
+            tmp_pptx.write(buffer)
+            pptx_path = tmp_pptx.name
+        
+        pdf_path = pptx_path.replace('.pptx', '.pdf')
+        
+        try:
+            powerpoint = comtypes.client.CreateObject("PowerPoint.Application")
+            powerpoint.Visible = 1
+            
+            presentation = powerpoint.Presentations.Open(pptx_path)
+            presentation.SaveAs(pdf_path, 32)  # 32 = ppSaveAsPDF
+            presentation.Close()
+            powerpoint.Quit()
+            
+            with open(pdf_path, 'rb') as f:
+                result = f.read()
+            
+            return result
+        finally:
+            # Cleanup
+            if os.path.exists(pptx_path):
+                os.unlink(pptx_path)
+            if os.path.exists(pdf_path):
+                os.unlink(pdf_path)
+    
+    @staticmethod
+    def _convert_with_libreoffice(buffer: bytes) -> bytes:
+        """Convert using LibreOffice."""
+        import tempfile
+        import subprocess
+        import os
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pptx_path = os.path.join(tmpdir, 'input.pptx')
+            
+            with open(pptx_path, 'wb') as f:
+                f.write(buffer)
+            
+            # Try different LibreOffice paths
+            soffice_paths = [
+                'soffice',
+                '/usr/bin/soffice',
+                '/usr/bin/libreoffice',
+                'C:\\Program Files\\LibreOffice\\program\\soffice.exe',
+                'C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe',
+            ]
+            
+            for soffice in soffice_paths:
+                try:
+                    result = subprocess.run([
+                        soffice,
+                        '--headless',
+                        '--convert-to', 'pdf',
+                        '--outdir', tmpdir,
+                        pptx_path
+                    ], capture_output=True, timeout=120)
+                    
+                    pdf_path = os.path.join(tmpdir, 'input.pdf')
+                    if os.path.exists(pdf_path):
+                        with open(pdf_path, 'rb') as f:
+                            return f.read()
+                except FileNotFoundError:
+                    continue
+                except subprocess.TimeoutExpired:
+                    raise ConversionError("LibreOffice conversion timed out")
+            
+            raise ConversionError("LibreOffice not found")
+    
+    @staticmethod
+    def _convert_basic(buffer: bytes) -> bytes:
+        """Basic fallback: render slides as images then combine to PDF."""
         if not PPTX_AVAILABLE:
             raise ConversionError("python-pptx library not available")
         
@@ -514,47 +617,74 @@ class PowerPointToPDFConverter:
             output = io.BytesIO()
             c = canvas.Canvas(output, pagesize=(slide_width, slide_height))
             
-            for slide in prs.slides:
-                # Draw background
-                c.setFillColor((1, 1, 1))  # White background
+            for slide_num, slide in enumerate(prs.slides, 1):
+                # Draw white background
+                c.setFillColorRGB(1, 1, 1)
                 c.rect(0, 0, slide_width, slide_height, fill=1)
                 
-                # Extract and draw text from shapes
-                y_offset = slide_height - 50
+                # Try to extract shapes with better positioning
+                shapes_data = []
                 
                 for shape in slide.shapes:
-                    if hasattr(shape, "text") and shape.text.strip():
-                        text = shape.text.strip()
-                        
-                        # Basic positioning
-                        x = 50
-                        y = y_offset
-                        
-                        c.setFont("Helvetica", 12)
-                        
-                        # Word wrap
-                        words = text.split()
-                        lines = []
-                        current_line = []
-                        
-                        for word in words:
-                            current_line.append(word)
-                            test_line = ' '.join(current_line)
-                            if c.stringWidth(test_line, "Helvetica", 12) > slide_width - 100:
-                                current_line.pop()
-                                if current_line:
-                                    lines.append(' '.join(current_line))
-                                current_line = [word]
-                        
-                        if current_line:
-                            lines.append(' '.join(current_line))
-                        
-                        for line in lines:
-                            if y > 50:
-                                c.drawString(x, y, line)
-                                y -= 16
-                        
-                        y_offset = y - 20
+                    try:
+                        if hasattr(shape, 'left') and hasattr(shape, 'top'):
+                            x = shape.left.pt if hasattr(shape.left, 'pt') else 50
+                            y = slide_height - (shape.top.pt if hasattr(shape.top, 'pt') else 50)
+                            width = shape.width.pt if hasattr(shape, 'width') and hasattr(shape.width, 'pt') else 400
+                            
+                            if hasattr(shape, "text") and shape.text.strip():
+                                shapes_data.append({
+                                    'x': x,
+                                    'y': y,
+                                    'text': shape.text.strip(),
+                                    'width': width
+                                })
+                    except:
+                        pass
+                
+                # Sort by vertical position (top to bottom)
+                shapes_data.sort(key=lambda s: -s['y'])
+                
+                for shape_data in shapes_data:
+                    text = shape_data['text']
+                    x = max(30, shape_data['x'])
+                    y = shape_data['y']
+                    max_width = shape_data['width']
+                    
+                    # Determine font size based on position (titles are usually at top)
+                    if y > slide_height - 100:
+                        font_size = 24
+                        c.setFont("Helvetica-Bold", font_size)
+                    else:
+                        font_size = 14
+                        c.setFont("Helvetica", font_size)
+                    
+                    # Word wrap
+                    words = text.split()
+                    lines = []
+                    current_line = []
+                    
+                    for word in words:
+                        current_line.append(word)
+                        test_line = ' '.join(current_line)
+                        if c.stringWidth(test_line, "Helvetica", font_size) > max_width - 20:
+                            current_line.pop()
+                            if current_line:
+                                lines.append(' '.join(current_line))
+                            current_line = [word]
+                    
+                    if current_line:
+                        lines.append(' '.join(current_line))
+                    
+                    for line in lines:
+                        if y > 30:
+                            c.drawString(x, y, line)
+                            y -= font_size + 4
+                
+                # Add slide number at bottom
+                c.setFont("Helvetica", 10)
+                c.setFillColorRGB(0.5, 0.5, 0.5)
+                c.drawString(slide_width - 50, 20, str(slide_num))
                 
                 c.showPage()
             
