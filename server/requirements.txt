@@ -23,6 +23,9 @@ Pillow>=11.0.0
 img2pdf>=0.5.1
 pdf2image>=1.17.0
 
+# HTTP requests (for CloudConvert API)
+requests>=2.31.0
+
 # Encryption/Security
 cryptography>=43.0.3
 
@@ -31,5 +34,3 @@ openai>=1.0.0
 
 # Environment variables
 python-dotenv>=1.0.0
-
-# Note: LibreOffice is installed via Aptfile for PPTX/DOCX to PDF conversion on Render

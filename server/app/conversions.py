@@ -498,10 +498,19 @@ class PowerPointToPDFConverter:
     @staticmethod
     def convert(buffer: bytes) -> bytes:
         """
-        Convert PowerPoint to PDF using Microsoft PowerPoint (Windows) or fallback.
+        Convert PowerPoint to PDF using the best available method.
+        Priority: CloudConvert API → PowerPoint COM (Windows) → LibreOffice → Basic
         """
         import platform
-        import subprocess
+        import os
+        
+        # Try CloudConvert API first (best quality, works everywhere)
+        cloudconvert_key = os.environ.get('CLOUDCONVERT_API_KEY')
+        if cloudconvert_key:
+            try:
+                return PowerPointToPDFConverter._convert_with_cloudconvert(buffer, cloudconvert_key)
+            except Exception as e:
+                print(f"CloudConvert failed: {e}, trying other methods...")
         
         # On Windows, try to use PowerPoint COM for accurate conversion
         if platform.system() == "Windows":
@@ -519,6 +528,66 @@ class PowerPointToPDFConverter:
         
         # Final fallback: basic text extraction
         return PowerPointToPDFConverter._convert_basic(buffer)
+    
+    @staticmethod
+    def _convert_with_cloudconvert(buffer: bytes, api_key: str) -> bytes:
+        """Convert using CloudConvert API (25 free/day)."""
+        import requests
+        import time
+        
+        headers = {"Authorization": f"Bearer {api_key}"}
+        base_url = "https://api.cloudconvert.com/v2"
+        
+        # Step 1: Create job
+        job_response = requests.post(
+            f"{base_url}/jobs",
+            headers=headers,
+            json={
+                "tasks": {
+                    "upload-file": {"operation": "import/upload"},
+                    "convert-file": {
+                        "operation": "convert",
+                        "input": ["upload-file"],
+                        "output_format": "pdf"
+                    },
+                    "export-file": {
+                        "operation": "export/url",
+                        "input": ["convert-file"]
+                    }
+                }
+            }
+        )
+        job_response.raise_for_status()
+        job_data = job_response.json()
+        
+        # Step 2: Upload file
+        upload_task = next(t for t in job_data["data"]["tasks"] if t["name"] == "upload-file")
+        upload_url = upload_task["result"]["form"]["url"]
+        upload_params = upload_task["result"]["form"]["parameters"]
+        
+        files = {"file": ("input.pptx", buffer, "application/vnd.openxmlformats-officedocument.presentationml.presentation")}
+        upload_response = requests.post(upload_url, data=upload_params, files=files)
+        upload_response.raise_for_status()
+        
+        # Step 3: Wait for conversion
+        job_id = job_data["data"]["id"]
+        for _ in range(60):  # Wait up to 60 seconds
+            time.sleep(1)
+            status_response = requests.get(f"{base_url}/jobs/{job_id}", headers=headers)
+            status_data = status_response.json()
+            
+            if status_data["data"]["status"] == "finished":
+                # Get download URL
+                export_task = next(t for t in status_data["data"]["tasks"] if t["name"] == "export-file")
+                download_url = export_task["result"]["files"][0]["url"]
+                
+                # Download PDF
+                pdf_response = requests.get(download_url)
+                return pdf_response.content
+            elif status_data["data"]["status"] == "error":
+                raise ConversionError("CloudConvert conversion failed")
+        
+        raise ConversionError("CloudConvert conversion timed out")
     
     @staticmethod
     def _convert_with_com(buffer: bytes) -> bytes:
