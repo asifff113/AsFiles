@@ -1,0 +1,89 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Outfit:wght@700;800;900&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply antialiased;
+  }
+
+  html {
+    @apply scroll-smooth;
+  }
+
+  body {
+    @apply bg-background text-white font-sans overflow-x-hidden;
+    background: linear-gradient(135deg, #0a0a0a 0%, #0f0f1e 50%, #1a0a0a 100%);
+    position: relative;
+  }
+
+  /* Modern scrollbar */
+  ::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-gradient-to-b from-orange-500 to-purple-500 rounded-full;
+    background-clip: padding-box;
+    border: 2px solid transparent;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply shadow-lg shadow-orange-500/50;
+  }
+}
+
+@layer components {
+  /* Glass morphism effects */
+  .glass-panel {
+    @apply bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl shadow-xl;
+  }
+
+  .glass-panel-hover {
+    @apply glass-panel hover:bg-white/8 hover:border-white/20 hover:shadow-2xl transition-all duration-300;
+  }
+
+  /* Glow effects */
+  .glow-text {
+    @apply drop-shadow-[0_0_8px_rgba(242,107,76,0.6)];
+  }
+
+  .glow-border {
+    @apply border border-orange-500/30 shadow-lg shadow-orange-500/20;
+  }
+
+  .glow-border-hover {
+    @apply glow-border hover:border-orange-500/60 hover:shadow-xl hover:shadow-orange-500/40 transition-all duration-300;
+  }
+
+  /* Gradient text */
+  .gradient-text {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-cyan-200 via-white to-orange-200;
+  }
+
+  .gradient-text-primary {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-orange-400 to-red-500;
+  }
+}
+
+@layer utilities {
+  .backdrop-blur-xl {
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+  }
+
+  .animation-delay-2000 {
+    animation-delay: 2s;
+  }
+
+  .animation-delay-4000 {
+    animation-delay: 4s;
+  }
+}
+

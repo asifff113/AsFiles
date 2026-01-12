@@ -1,0 +1,12 @@
+# Web
+web/node_modules
+web/dist
+
+# Server
+server/.venv
+server/__pycache__
+server/app/__pycache__
+
+# General
+.DS_Store
+*.log
