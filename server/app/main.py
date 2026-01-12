@@ -84,7 +84,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"],
+    allow_origins=["*"],  # Allow all origins for deployment
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -94,6 +94,12 @@ app.add_middleware(
 # =============================================================================
 # Health & Status
 # =============================================================================
+
+@app.get("/")
+async def root():
+    """Root endpoint for healthcheck."""
+    return {"status": "ok", "service": "AsFiles API", "version": "1.0.0"}
+
 
 @app.get("/api/health")
 async def health_check():
