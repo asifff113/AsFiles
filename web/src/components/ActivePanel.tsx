@@ -177,13 +177,25 @@ export const ActivePanel = ({ tool }: ActivePanelProps) => {
 
     try {
       const apiUrl = (import.meta.env?.VITE_API_URL as string) || 'http://localhost:8000';
+      console.log(`[AsFiles] Sending request to: ${apiUrl}${tool.config.endpoint}`);
+      console.log(`[AsFiles] Files:`, files.map(f => `${f.file.name} (${f.file.size} bytes)`));
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 min timeout
+      
       const response = await fetch(`${apiUrl}${tool.config.endpoint}`, {
         method: tool.config.method,
         body: formData,
+        signal: controller.signal,
       });
+      
+      clearTimeout(timeoutId);
+      console.log(`[AsFiles] Response status: ${response.status}`);
 
       if (!response.ok) {
-        throw new Error(await response.text() || "Processing failed");
+        const errorText = await response.text();
+        console.error(`[AsFiles] Error response:`, errorText);
+        throw new Error(errorText || "Processing failed");
       }
 
       // For AI tools, read as text and display in UI
