@@ -147,7 +147,7 @@ export const ActivePanel = ({ tool }: ActivePanelProps) => {
     });
 
     try {
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      const apiUrl = (import.meta.env?.VITE_API_URL as string) || 'http://localhost:8000';
       const response = await fetch(`${apiUrl}${tool.config.endpoint}`, {
         method: tool.config.method,
         body: formData,
@@ -177,7 +177,7 @@ export const ActivePanel = ({ tool }: ActivePanelProps) => {
   };
 
   // Get the icon component dynamically
-  const IconComponent = (LucideIcons as Record<string, React.ComponentType<{ className?: string; size?: number }>>)[tool.icon] || LucideIcons.File;
+  const IconComponent = (LucideIcons as unknown as Record<string, LucideIcons.LucideIcon>)[tool.icon] || LucideIcons.File;
 
   if (tool.status !== "ready" || !tool.config) {
     return (

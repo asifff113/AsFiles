@@ -2,6 +2,7 @@
 import { motion } from "framer-motion";
 import { Tool } from "../config/tools";
 import * as LucideIcons from "lucide-react";
+import { LucideIcon } from "lucide-react";
 
 interface ToolCardProps {
   tool: Tool;
@@ -12,7 +13,7 @@ interface ToolCardProps {
 const ToolCard = ({ tool, isActive, onClick }: ToolCardProps) => {
   const isPriority = tool.tag?.toLowerCase() === "priority";
   // Dynamically get the Lucide icon component
-  const IconComponent = (LucideIcons as Record<string, React.ComponentType<{ className?: string; size?: number }>>)[tool.icon] || LucideIcons.File;
+  const IconComponent = (LucideIcons as unknown as Record<string, LucideIcon>)[tool.icon] || LucideIcons.File;
 
   return (
     <motion.button
