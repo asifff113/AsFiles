@@ -772,8 +772,16 @@ class HTMLToPDFConverter:
         """Convert a webpage URL to PDF using pyppeteer."""
         try:
             from pyppeteer import launch
+            import os
             
-            browser = await launch(headless=True)
+            # Use system Chromium if available (Docker)
+            chromium_path = os.environ.get('PUPPETEER_EXECUTABLE_PATH', None)
+            
+            browser = await launch(
+                headless=True,
+                executablePath=chromium_path,
+                args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+            )
             page = await browser.newPage()
             await page.goto(url, waitUntil='networkidle0')
             

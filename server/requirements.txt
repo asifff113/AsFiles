@@ -29,6 +29,9 @@ requests>=2.31.0
 # Encryption/Security
 cryptography>=43.0.3
 
+# URL to PDF (webpage screenshots)
+pyppeteer>=2.0.0
+
 # AI Features (set GROQ_API_KEY to enable)
 openai>=1.0.0
 

@@ -1,12 +1,18 @@
 FROM python:3.11-slim
 
-# Install LibreOffice
+# Install LibreOffice and Chromium for pyppeteer
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libreoffice-writer \
     libreoffice-impress \
     libreoffice-calc \
+    chromium \
+    chromium-driver \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# Set Chromium path for pyppeteer
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV PYPPETEER_CHROMIUM_REVISION=1
 
 # Set working directory
 WORKDIR /app
