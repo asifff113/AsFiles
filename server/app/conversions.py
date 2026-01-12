@@ -773,6 +773,7 @@ class HTMLToPDFConverter:
         try:
             from pyppeteer import launch
             import os
+            import asyncio
             
             # Use system Chromium if available (Docker)
             chromium_path = os.environ.get('PUPPETEER_EXECUTABLE_PATH', None)
@@ -783,7 +784,48 @@ class HTMLToPDFConverter:
                 args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
             )
             page = await browser.newPage()
-            await page.goto(url, waitUntil='networkidle0')
+            
+            # Set viewport to capture full page
+            await page.setViewport({'width': 1920, 'height': 1080})
+            
+            # Navigate to page
+            await page.goto(url, waitUntil='networkidle0', timeout=60000)
+            
+            # Scroll through entire page to trigger lazy loading
+            await page.evaluate('''async () => {
+                await new Promise((resolve) => {
+                    let totalHeight = 0;
+                    const distance = 500;
+                    const timer = setInterval(() => {
+                        const scrollHeight = document.body.scrollHeight;
+                        window.scrollBy(0, distance);
+                        totalHeight += distance;
+                        if (totalHeight >= scrollHeight) {
+                            clearInterval(timer);
+                            window.scrollTo(0, 0);
+                            resolve();
+                        }
+                    }, 100);
+                });
+            }''')
+            
+            # Wait for images to load
+            await page.evaluate('''async () => {
+                const images = document.querySelectorAll('img');
+                await Promise.all(
+                    Array.from(images).map(img => {
+                        if (img.complete) return Promise.resolve();
+                        return new Promise((resolve) => {
+                            img.addEventListener('load', resolve);
+                            img.addEventListener('error', resolve);
+                            setTimeout(resolve, 5000);
+                        });
+                    })
+                );
+            }''')
+            
+            # Extra wait for any animations/transitions
+            await asyncio.sleep(2)
             
             pdf_bytes = await page.pdf({
                 'format': 'A4',
