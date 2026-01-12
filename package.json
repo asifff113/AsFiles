@@ -1,0 +1,8 @@
+{
+  "name": "asfiles",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "cd web && npm install && npm run build",
+    "dev": "cd web && npm run dev"
+  }
+}
