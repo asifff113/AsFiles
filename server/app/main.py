@@ -915,17 +915,33 @@ async def ppt_to_pdf(file: UploadFile = File(...)):
 @app.post("/api/convert/html-to-pdf")
 async def html_to_pdf(url: str = Form(...)):
     """Convert webpage URL to PDF."""
+    print(f"[HTML to PDF] Received URL: {url}")
+    
+    if not url or not url.strip():
+        raise HTTPException(status_code=400, detail="URL is required")
+    
+    url = url.strip()
+    
     if not url.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="URL must start with http:// or https://")
     
     try:
+        print(f"[HTML to PDF] Converting: {url}")
         result = await HTMLToPDFConverter.convert_url(url)
+        print(f"[HTML to PDF] Success! Generated {len(result)} bytes")
     except ConversionError as exc:
+        print(f"[HTML to PDF] Error: {exc}")
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
+        print(f"[HTML to PDF] Unexpected error: {exc}")
         raise HTTPException(status_code=500, detail="Conversion failed.")
     
-    headers = {"Content-Disposition": "attachment; filename=webpage.pdf"}
+    # Use domain name for filename
+    from urllib.parse import urlparse
+    domain = urlparse(url).netloc.replace("www.", "").replace(".", "_")
+    filename = f"{domain}.pdf" if domain else "webpage.pdf"
+    
+    headers = {"Content-Disposition": f"attachment; filename={filename}"}
     return StreamingResponse(
         io.BytesIO(result),
         media_type="application/pdf",
