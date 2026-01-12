@@ -499,32 +499,32 @@ class PowerPointToPDFConverter:
     def convert(buffer: bytes) -> bytes:
         """
         Convert PowerPoint to PDF using the best available method.
-        Priority: CloudConvert API → PowerPoint COM (Windows) → LibreOffice → Basic
+        Priority: LibreOffice (unlimited) → PowerPoint COM (Windows) → CloudConvert API → Basic
         """
         import platform
         import os
         
-        # Try CloudConvert API first (best quality, works everywhere)
-        cloudconvert_key = os.environ.get('CLOUDCONVERT_API_KEY')
-        if cloudconvert_key:
-            try:
-                return PowerPointToPDFConverter._convert_with_cloudconvert(buffer, cloudconvert_key)
-            except Exception as e:
-                print(f"CloudConvert failed: {e}, trying other methods...")
+        # Try LibreOffice first (unlimited, free, installed in Docker)
+        try:
+            return PowerPointToPDFConverter._convert_with_libreoffice(buffer)
+        except Exception as e:
+            print(f"LibreOffice failed: {e}, trying other methods...")
         
         # On Windows, try to use PowerPoint COM for accurate conversion
         if platform.system() == "Windows":
             try:
                 return PowerPointToPDFConverter._convert_with_com(buffer)
             except Exception as e:
-                print(f"COM conversion failed: {e}, trying LibreOffice...")
+                print(f"COM conversion failed: {e}, trying CloudConvert...")
                 pass
         
-        # Try LibreOffice as fallback
-        try:
-            return PowerPointToPDFConverter._convert_with_libreoffice(buffer)
-        except Exception:
-            pass
+        # Try CloudConvert API as fallback (limited free quota)
+        cloudconvert_key = os.environ.get('CLOUDCONVERT_API_KEY')
+        if cloudconvert_key:
+            try:
+                return PowerPointToPDFConverter._convert_with_cloudconvert(buffer, cloudconvert_key)
+            except Exception as e:
+                print(f"CloudConvert failed: {e}, trying basic method...")
         
         # Final fallback: basic text extraction
         return PowerPointToPDFConverter._convert_basic(buffer)
