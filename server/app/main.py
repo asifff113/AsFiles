@@ -936,10 +936,20 @@ async def html_to_pdf(url: str = Form(...)):
         print(f"[HTML to PDF] Unexpected error: {exc}")
         raise HTTPException(status_code=500, detail="Conversion failed.")
     
-    # Use domain name for filename
+    # Generate unique filename from URL
     from urllib.parse import urlparse
-    domain = urlparse(url).netloc.replace("www.", "").replace(".", "_")
-    filename = f"{domain}.pdf" if domain else "webpage.pdf"
+    import re
+    import hashlib
+    parsed = urlparse(url)
+    domain = parsed.netloc.replace("www.", "")
+    path = parsed.path.strip("/").replace("/", "_") if parsed.path.strip("/") else "home"
+    # Clean the path for filename
+    path = re.sub(r'[^\w\-_]', '_', path)[:50]
+    # Add short hash for uniqueness
+    url_hash = hashlib.md5(url.encode()).hexdigest()[:6]
+    filename = f"{domain}_{path}_{url_hash}.pdf"
+    # Clean any double underscores
+    filename = re.sub(r'_+', '_', filename)
     
     headers = {"Content-Disposition": f"attachment; filename={filename}"}
     return StreamingResponse(
