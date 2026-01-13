@@ -1,11 +1,13 @@
 # Web
 web/node_modules
 web/dist
+web/.env
 
 # Server
 server/.venv
 server/__pycache__
 server/app/__pycache__
+server/.env
 
 # General
 .DS_Store
