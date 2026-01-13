@@ -3,6 +3,8 @@ libreoffice-impress
 libreoffice-calc
 libreoffice-common
 poppler-utils
+libxml2-dev
+libxslt1-dev
 fonts-liberation
 fonts-liberation2
 fonts-dejavu

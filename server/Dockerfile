@@ -1,12 +1,15 @@
 FROM python:3.11-slim
 
-# Install LibreOffice, Chromium, and fonts for proper rendering
+# Install LibreOffice, Chromium, lxml dependencies, and fonts for proper rendering
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libreoffice-writer \
     libreoffice-impress \
     libreoffice-calc \
     chromium \
     chromium-driver \
+    # lxml dependencies
+    libxml2-dev \
+    libxslt1-dev \
     # Fonts for proper text rendering in LibreOffice
     fonts-liberation \
     fonts-liberation2 \
