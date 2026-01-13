@@ -600,23 +600,24 @@ class PowerPointToPDFConverter:
         Convert PowerPoint to PDF using the best available method.
         
         Strategy:
-        1. Try LibreOffice first (free, unlimited)
-        2. If any blank pages detected, use HYBRID approach:
-           - Keep good pages from LibreOffice
-           - Re-render blank pages using slide-to-image method
-        3. CloudConvert as final fallback (limited quota)
+        1. For large files (>5MB), use CloudConvert first (faster, avoids timeout)
+        2. Try LibreOffice for smaller files (free, unlimited)
+        3. If any blank pages detected, use HYBRID approach
+        4. CloudConvert as final fallback
         
         Set PPTX_CONVERT_METHOD env var to force: 'libreoffice', 'cloudconvert', 'hybrid', 'sliderender'
         """
         import platform
         import os
         
+        file_size_mb = len(buffer) / (1024 * 1024)
         forced_method = os.environ.get('PPTX_CONVERT_METHOD', '').lower()
-        print(f"[PPTX→PDF] Starting conversion, forced_method={forced_method or 'auto'}")
+        print(f"[PPTX→PDF] Starting conversion, size={file_size_mb:.2f}MB, forced_method={forced_method or 'auto'}")
+        
+        cloudconvert_key = os.environ.get('CLOUDCONVERT_API_KEY')
         
         # Forced method handling
         if forced_method == 'cloudconvert':
-            cloudconvert_key = os.environ.get('CLOUDCONVERT_API_KEY')
             if cloudconvert_key:
                 return PowerPointToPDFConverter._convert_with_cloudconvert(buffer, cloudconvert_key)
             raise ConversionError("CLOUDCONVERT_API_KEY not set")
@@ -627,9 +628,17 @@ class PowerPointToPDFConverter:
         elif forced_method == 'hybrid':
             return PowerPointToPDFConverter._convert_hybrid(buffer)
         
-        # Auto mode: Try LibreOffice, then hybrid fix, then CloudConvert
-        cloudconvert_key = os.environ.get('CLOUDCONVERT_API_KEY')
+        # Auto mode: Large files (>5MB) go to CloudConvert first to avoid timeout
+        if file_size_mb > 5.0 and cloudconvert_key:
+            print(f"[PPTX→PDF] Large file ({file_size_mb:.1f}MB), using CloudConvert for speed...")
+            try:
+                result = PowerPointToPDFConverter._convert_with_cloudconvert(buffer, cloudconvert_key)
+                print("[PPTX→PDF] CloudConvert succeeded!")
+                return result
+            except Exception as e:
+                print(f"[PPTX→PDF] CloudConvert failed: {e}, falling back to LibreOffice...")
         
+        # Standard flow: Try LibreOffice, then hybrid fix
         try:
             print("[PPTX→PDF] Trying LibreOffice...")
             result, blank_pages = PowerPointToPDFConverter._convert_with_libreoffice(buffer, strict=False, return_blank_info=True)
