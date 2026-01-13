@@ -707,6 +707,32 @@ async def pdf_info(file: UploadFile = File(...)):
 # Conversions
 # =============================================================================
 
+@app.post("/api/convert/pdf-to-images")
+async def pdf_to_images(
+    file: UploadFile = File(...),
+    format: Literal["jpg", "png", "webp", "tiff", "bmp"] = Form("jpg"),
+    dpi: int = Form(150),
+):
+    """Convert PDF to images (JPG, PNG, WEBP, TIFF, or BMP) returned as ZIP."""
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="File must be a PDF")
+    
+    try:
+        buffer = await file.read()
+        result = PDFToImageConverter.convert_to_zip(buffer, format, dpi)
+    except ConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Conversion failed.")
+    
+    headers = {"Content-Disposition": "attachment; filename=images.zip"}
+    return StreamingResponse(
+        io.BytesIO(result),
+        media_type="application/zip",
+        headers=headers,
+    )
+
+
 @app.post("/api/convert/pdf-to-jpg")
 async def pdf_to_jpg(
     file: UploadFile = File(...),

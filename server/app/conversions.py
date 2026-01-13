@@ -63,7 +63,7 @@ class PDFToImageConverter:
     @staticmethod
     def convert(
         buffer: bytes,
-        format: Literal["jpg", "png"] = "jpg",
+        format: Literal["jpg", "png", "webp", "tiff", "bmp"] = "jpg",
         dpi: int = 150,
         pages: Optional[list[int]] = None
     ) -> list[bytes]:
@@ -72,28 +72,36 @@ class PDFToImageConverter:
         
         Args:
             buffer: PDF file bytes
-            format: Output format (jpg or png)
+            format: Output format (jpg, png, webp, tiff, bmp)
             dpi: Resolution in dots per inch
             pages: Specific page numbers (0-indexed), None for all pages
             
         Returns:
             List of image bytes for each page
         """
-        if not PDF2IMAGE_AVAILABLE:
-            raise ConversionError("pdf2image library not available. Install poppler.")
-        
+        # Try pdf2image first (better quality), fall back to PyMuPDF
         try:
-            # Convert all pages or specific pages
+            if PDF2IMAGE_AVAILABLE:
+                return PDFToImageConverter._convert_with_pdf2image(buffer, format, dpi, pages)
+        except Exception:
+            pass
+        
+        # Fallback to PyMuPDF (works without poppler)
+        return PDFToImageConverter._convert_with_pymupdf(buffer, format, dpi, pages)
+    
+    @staticmethod
+    def _convert_with_pdf2image(
+        buffer: bytes,
+        format: Literal["jpg", "png", "webp", "tiff", "bmp"],
+        dpi: int,
+        pages: Optional[list[int]]
+    ) -> list[bytes]:
+        """Convert using pdf2image (requires poppler)."""
+        try:
             if pages:
-                # pdf2image uses 1-indexed pages
                 first_page = min(pages) + 1
                 last_page = max(pages) + 1
-                images = convert_from_bytes(
-                    buffer,
-                    dpi=dpi,
-                    first_page=first_page,
-                    last_page=last_page
-                )
+                images = convert_from_bytes(buffer, dpi=dpi, first_page=first_page, last_page=last_page)
             else:
                 images = convert_from_bytes(buffer, dpi=dpi)
             
@@ -106,18 +114,77 @@ class PDFToImageConverter:
                 if format == "jpg":
                     img = img.convert("RGB")
                     img.save(output, format="JPEG", quality=85, optimize=True)
-                else:
+                elif format == "png":
                     img.save(output, format="PNG", optimize=True)
+                elif format == "webp":
+                    img.save(output, format="WEBP", quality=85, method=6)
+                elif format == "tiff":
+                    img.save(output, format="TIFF", compression="tiff_lzw")
+                elif format == "bmp":
+                    img.save(output, format="BMP")
                 results.append(output.getvalue())
             
             return results
+        except Exception as e:
+            raise ConversionError(f"pdf2image conversion failed: {e}")
+    
+    @staticmethod
+    def _convert_with_pymupdf(
+        buffer: bytes,
+        format: Literal["jpg", "png", "webp", "tiff", "bmp"],
+        dpi: int,
+        pages: Optional[list[int]]
+    ) -> list[bytes]:
+        """Convert using PyMuPDF/fitz (no poppler required)."""
+        try:
+            import fitz
+            
+            doc = fitz.open(stream=buffer, filetype="pdf")
+            results = []
+            
+            zoom = dpi / 72.0
+            mat = fitz.Matrix(zoom, zoom)
+            
+            page_range = pages if pages else range(len(doc))
+            
+            for page_num in page_range:
+                if page_num >= len(doc):
+                    continue
+                    
+                page = doc[page_num]
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                
+                # PyMuPDF natively supports jpg and png
+                if format == "jpg":
+                    img_bytes = pix.tobytes("jpeg", jpg_quality=85)
+                elif format == "png":
+                    img_bytes = pix.tobytes("png")
+                else:
+                    # For other formats, use PIL
+                    pil_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    output = io.BytesIO()
+                    
+                    if format == "webp":
+                        pil_img.save(output, format="WEBP", quality=85, method=6)
+                    elif format == "tiff":
+                        pil_img.save(output, format="TIFF", compression="tiff_lzw")
+                    elif format == "bmp":
+                        pil_img.save(output, format="BMP")
+                    
+                    img_bytes = output.getvalue()
+                
+                results.append(img_bytes)
+            
+            doc.close()
+            return results
+            
         except Exception as e:
             raise ConversionError(f"PDF to image conversion failed: {e}")
     
     @staticmethod
     def convert_to_zip(
         buffer: bytes,
-        format: Literal["jpg", "png"] = "jpg",
+        format: Literal["jpg", "png", "webp", "tiff", "bmp"] = "jpg",
         dpi: int = 150
     ) -> bytes:
         """Convert all PDF pages to images and return as ZIP file."""
@@ -478,12 +545,11 @@ class PDFToPowerPointConverter:
         if not PPTX_AVAILABLE:
             raise ConversionError("python-pptx library not available")
         
-        if not PDF2IMAGE_AVAILABLE:
-            raise ConversionError("pdf2image library not available")
-        
         try:
-            # Convert PDF pages to images
-            images = convert_from_bytes(buffer, dpi=dpi)
+            import fitz
+            
+            # Use PyMuPDF to convert pages to images
+            doc = fitz.open(stream=buffer, filetype="pdf")
             
             # Create PowerPoint presentation
             prs = Presentation()
@@ -492,37 +558,30 @@ class PDFToPowerPointConverter:
             
             blank_layout = prs.slide_layouts[6]  # Blank layout
             
-            for img in images:
+            zoom = dpi / 72.0
+            mat = fitz.Matrix(zoom, zoom)
+            
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                
+                # Convert pixmap to PNG bytes
+                img_bytes = pix.tobytes("png")
+                img_buffer = io.BytesIO(img_bytes)
+                
+                # Add slide
                 slide = prs.slides.add_slide(blank_layout)
                 
-                # Save image to bytes
-                img_buffer = io.BytesIO()
-                img.save(img_buffer, format='PNG')
-                img_buffer.seek(0)
-                
-                # Calculate dimensions to fit slide
-                slide_width = prs.slide_width
-                slide_height = prs.slide_height
-                
-                img_width, img_height = img.size
-                scale = min(
-                    slide_width / PPTXInches(img_width / dpi),
-                    slide_height / PPTXInches(img_height / dpi)
-                )
-                
-                new_width = int(img_width / dpi * scale)
-                new_height = int(img_height / dpi * scale)
-                
-                left = (slide_width - PPTXInches(new_width)) / 2
-                top = (slide_height - PPTXInches(new_height)) / 2
-                
+                # Add image to fill slide
                 slide.shapes.add_picture(
                     img_buffer,
                     PPTXInches(0.25),
                     PPTXInches(0.25),
-                    width=slide_width - PPTXInches(0.5),
-                    height=slide_height - PPTXInches(0.5)
+                    width=prs.slide_width - PPTXInches(0.5),
+                    height=prs.slide_height - PPTXInches(0.5)
                 )
+            
+            doc.close()
             
             output = io.BytesIO()
             prs.save(output)

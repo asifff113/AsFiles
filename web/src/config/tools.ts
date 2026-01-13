@@ -365,18 +365,31 @@ export const tools: Tool[] = [
   },
   {
     id: "pdf-to-jpg",
-    title: "PDF to JPG",
-    description: "Convert PDF pages to images.",
+    title: "PDF to Images",
+    description: "Convert PDF to JPG, PNG, WEBP, TIFF, or BMP.",
     icon: "Image",
     accent: "from-blue-500 to-cyan-500",
     status: "ready",
     category: "convert",
     config: {
-      endpoint: "/api/convert/pdf-to-jpg",
+      endpoint: "/api/convert/pdf-to-images",
       method: "POST",
       acceptedFiles: [".pdf"],
       multiFile: false,
       formFields: [
+        {
+          name: "format",
+          label: "Image Format",
+          type: "select",
+          defaultValue: "jpg",
+          options: [
+            { value: "jpg", label: "JPG (smallest, lossy)" },
+            { value: "png", label: "PNG (lossless, transparent)" },
+            { value: "webp", label: "WEBP (modern, efficient)" },
+            { value: "tiff", label: "TIFF (archival quality)" },
+            { value: "bmp", label: "BMP (uncompressed)" },
+          ],
+        },
         {
           name: "dpi",
           label: "Quality (DPI)",
