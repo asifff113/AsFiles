@@ -3,3 +3,13 @@ libreoffice-impress
 libreoffice-calc
 libreoffice-common
 poppler-utils
+fonts-liberation
+fonts-liberation2
+fonts-dejavu
+fonts-dejavu-core
+fonts-freefont-ttf
+fonts-noto
+fonts-noto-core
+fonts-crosextra-carlito
+fonts-crosextra-caladea
+fontconfig

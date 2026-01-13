@@ -30,6 +30,9 @@ requests>=2.31.0
 # Encryption/Security
 cryptography>=43.0.3
 
+# Windows COM automation (for PowerPoint on Windows)
+comtypes>=1.4.0; sys_platform == "win32"
+
 # URL to PDF (webpage screenshots)
 pyppeteer>=2.0.0
 

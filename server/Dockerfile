@@ -1,12 +1,28 @@
 FROM python:3.11-slim
 
-# Install LibreOffice and Chromium for pyppeteer
+# Install LibreOffice, Chromium, and fonts for proper rendering
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libreoffice-writer \
     libreoffice-impress \
     libreoffice-calc \
     chromium \
     chromium-driver \
+    # Fonts for proper text rendering in LibreOffice
+    fonts-liberation \
+    fonts-liberation2 \
+    fonts-dejavu \
+    fonts-dejavu-core \
+    fonts-freefont-ttf \
+    fonts-noto \
+    fonts-noto-core \
+    fonts-noto-cjk \
+    fonts-crosextra-carlito \
+    fonts-crosextra-caladea \
+    fontconfig \
+    # Accept EULA for MS fonts
+    && echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | debconf-set-selections \
+    && apt-get install -y --no-install-recommends ttf-mscorefonts-installer || true \
+    && fc-cache -f -v \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
