@@ -374,7 +374,7 @@ class ExcelToPDFConverter:
     
     @staticmethod
     def convert(buffer: bytes) -> bytes:
-        """Convert Excel file to PDF format."""
+        """Convert Excel file to PDF format with better formatting."""
         if not OPENPYXL_AVAILABLE:
             raise ConversionError("openpyxl library not available")
         
@@ -385,38 +385,78 @@ class ExcelToPDFConverter:
             c = canvas.Canvas(output, pagesize=letter)
             page_width, page_height = letter
             
-            margin = 50
-            y_position = page_height - margin
-            row_height = 14
-            col_width = 80
+            margin = 40
             
             for sheet_name in wb.sheetnames:
                 ws = wb[sheet_name]
                 
+                # Calculate column widths based on content
+                col_widths = {}
+                max_row = 0
+                for row_idx, row in enumerate(ws.iter_rows(values_only=True), 1):
+                    max_row = max(max_row, row_idx)
+                    for col_idx, cell_value in enumerate(row):
+                        if cell_value is not None:
+                            width = len(str(cell_value)) * 6 + 10
+                            col_widths[col_idx] = max(col_widths.get(col_idx, 60), min(width, 120))
+                
+                # Calculate total width needed
+                total_width = sum(col_widths.values())
+                available_width = page_width - (2 * margin)
+                
+                # Scale if needed
+                if total_width > available_width:
+                    scale_factor = available_width / total_width
+                    col_widths = {k: v * scale_factor for k, v in col_widths.items()}
+                
+                y_position = page_height - margin
+                row_height = 16
+                
                 # Sheet title
-                c.setFont("Helvetica-Bold", 14)
+                c.setFont("Helvetica-Bold", 12)
                 c.drawString(margin, y_position, f"Sheet: {sheet_name}")
-                y_position -= row_height * 2
+                y_position -= row_height * 1.5
                 
-                c.setFont("Helvetica", 10)
-                
-                for row in ws.iter_rows(values_only=True):
-                    if y_position < margin + row_height:
+                # Draw table
+                for row_idx, row in enumerate(ws.iter_rows(values_only=True)):
+                    if y_position < margin + row_height * 2:
                         c.showPage()
                         y_position = page_height - margin
-                        c.setFont("Helvetica", 10)
+                    
+                    # Use bold for first row (headers)
+                    if row_idx == 0:
+                        c.setFont("Helvetica-Bold", 9)
+                    else:
+                        c.setFont("Helvetica", 9)
                     
                     x_position = margin
-                    for cell_value in row:
-                        if cell_value is not None:
-                            text = str(cell_value)[:15]  # Truncate long values
-                            c.drawString(x_position, y_position, text)
-                        x_position += col_width
+                    for col_idx, cell_value in enumerate(row):
                         if x_position > page_width - margin:
                             break
+                            
+                        if cell_value is not None:
+                            # Handle numeric formatting
+                            if isinstance(cell_value, (int, float)):
+                                if isinstance(cell_value, float):
+                                    text = f"{cell_value:.2f}"
+                                else:
+                                    text = str(cell_value)
+                            else:
+                                text = str(cell_value)
+                            
+                            # Truncate if too long
+                            col_w = col_widths.get(col_idx, 60)
+                            max_chars = int(col_w / 6)
+                            if len(text) > max_chars:
+                                text = text[:max_chars-2] + ".."
+                            
+                            c.drawString(x_position, y_position, text)
+                        
+                        x_position += col_widths.get(col_idx, 60)
                     
                     y_position -= row_height
                 
+                # New page for each sheet
                 c.showPage()
                 y_position = page_height - margin
             
