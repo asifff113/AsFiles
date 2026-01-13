@@ -314,14 +314,25 @@ export const ActivePanel = ({ tool }: ActivePanelProps) => {
         {tool.config.formFields && (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 bg-white/5 p-6 rounded-xl border border-white/5">
              <div className="col-span-full text-xs font-bold uppercase tracking-wider text-gray-500">Configuration</div>
-            {tool.config.formFields.map(field => (
-              <FormField
-                key={field.name}
-                field={field}
-                value={formValues[field.name]}
-                onChange={(name, val) => setFormValues(prev => ({ ...prev, [name]: val }))}
-              />
-            ))}
+            {tool.config.formFields
+              .filter(field => {
+                // If no visibility rule is defined, always show the field
+                if (!field.visibleForOperations || field.name === "operation") {
+                  return true;
+                }
+                // Only apply conditional visibility when we have an operation selected
+                const currentOperation = formValues["operation"];
+                if (!currentOperation) return true;
+                return field.visibleForOperations.includes(String(currentOperation));
+              })
+              .map(field => (
+                <FormField
+                  key={field.name}
+                  field={field}
+                  value={formValues[field.name]}
+                  onChange={(name, val) => setFormValues(prev => ({ ...prev, [name]: val }))}
+                />
+              ))}
           </div>
         )}
 

@@ -49,6 +49,12 @@ export interface FormFieldConfig {
   step?: number;
   placeholder?: string;
   required?: boolean;
+  /**
+   * For tools that have an "operation" select (like the Image Editor),
+   * this optional list controls when the field should be shown.
+   * If omitted, the field is always visible.
+   */
+  visibleForOperations?: string[];
 }
 
 export interface Tool {
@@ -478,12 +484,14 @@ export const tools: Tool[] = [
           defaultValue: 100,
           min: 1,
           max: 500,
+          visibleForOperations: ["resize"],
         },
         {
           name: "angle",
           label: "Rotation Angle (degrees)",
           type: "number",
           defaultValue: 0,
+          visibleForOperations: ["rotate"],
         },
         {
           name: "radius",
@@ -492,6 +500,7 @@ export const tools: Tool[] = [
           defaultValue: 5,
           min: 1,
           max: 50,
+          visibleForOperations: ["blur"],
         },
         {
           name: "factor",
@@ -501,6 +510,7 @@ export const tools: Tool[] = [
           min: 0.5,
           max: 2.0,
           step: 0.1,
+          visibleForOperations: ["brightness", "contrast"],
         },
         {
           name: "direction",
@@ -511,6 +521,7 @@ export const tools: Tool[] = [
             { value: "horizontal", label: "Flip Horizontally" },
             { value: "vertical", label: "Flip Vertically" },
           ],
+          visibleForOperations: ["flip"],
         },
         {
           name: "bg_color",
@@ -518,6 +529,7 @@ export const tools: Tool[] = [
           type: "text",
           defaultValue: "FFFFFF",
           placeholder: "FFFFFF",
+          visibleForOperations: ["add_background"],
         },
         {
           name: "output_format",
