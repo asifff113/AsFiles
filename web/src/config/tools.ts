@@ -23,7 +23,9 @@ export type AcceptedFileType =
   | ".png" 
   | ".gif" 
   | ".bmp" 
-  | ".webp";
+  | ".webp"
+  | ".tiff"
+  | ".tif";
 
 export interface ToolConfig {
   endpoint: string;
