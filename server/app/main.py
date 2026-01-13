@@ -715,8 +715,13 @@ async def pdf_info(file: UploadFile = File(...)):
 async def edit_image(
     file: UploadFile = File(...),
     operation: str = Form(...),
-    output_format: str = Form("PNG"),
-    **kwargs
+    output_format: str = Form("png"),
+    percentage: int = Form(100),
+    angle: int = Form(0),
+    radius: int = Form(5),
+    factor: float = Form(1.0),
+    direction: str = Form("horizontal"),
+    bg_color: str = Form("FFFFFF"),
 ):
     """
     Edit image with various operations.
@@ -730,18 +735,21 @@ async def edit_image(
     try:
         buffer = await file.read()
         
-        # Parse form data for operation-specific parameters
-        form_data = await file.form()
-        params = dict(form_data)
-        params.pop("file", None)
-        params.pop("operation", None)
-        params.pop("output_format", None)
+        # Build params based on operation
+        params = {
+            "percentage": percentage,
+            "angle": angle,
+            "radius": radius,
+            "factor": factor,
+            "direction": direction,
+            "bg_color": bg_color,
+        }
         
         result = ImageProcessor.process(buffer, operation, output_format=output_format, **params)
     except ImageError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail="Image processing failed.")
+        raise HTTPException(status_code=500, detail=f"Image processing failed: {str(exc)}")
     
     # Determine MIME type
     mime_types = {
