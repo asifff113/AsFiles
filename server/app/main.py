@@ -51,6 +51,10 @@ from .conversions import (
     PowerPointToPDFConverter,
     HTMLToPDFConverter,
 )
+from .image_processing import (
+    ImageError,
+    ImageProcessor,
+)
 from .ocr import (
     OCRError,
     PDFOCRProcessor,
@@ -701,6 +705,58 @@ async def pdf_info(file: UploadFile = File(...)):
         return JSONResponse(content=info)
     except PDFError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# =============================================================================
+# Image Operations
+# =============================================================================
+
+@app.post("/api/image/edit")
+async def edit_image(
+    file: UploadFile = File(...),
+    operation: str = Form(...),
+    output_format: str = Form("PNG"),
+    **kwargs
+):
+    """
+    Edit image with various operations.
+    
+    Operations: resize, rotate, blur, format, grayscale, brightness, contrast, flip, remove_background, add_background
+    """
+    accepted_formats = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"}
+    if not any(file.filename.lower().endswith(fmt) for fmt in accepted_formats):
+        raise HTTPException(status_code=400, detail="File must be an image")
+    
+    try:
+        buffer = await file.read()
+        
+        # Parse form data for operation-specific parameters
+        form_data = await file.form()
+        params = dict(form_data)
+        params.pop("file", None)
+        params.pop("operation", None)
+        params.pop("output_format", None)
+        
+        result = ImageProcessor.process(buffer, operation, output_format=output_format, **params)
+    except ImageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Image processing failed.")
+    
+    # Determine MIME type
+    mime_types = {
+        "jpg": "image/jpeg", "jpeg": "image/jpeg",
+        "png": "image/png", "webp": "image/webp",
+        "bmp": "image/bmp", "tiff": "image/tiff", "tif": "image/tiff"
+    }
+    mime = mime_types.get(output_format.lower(), "image/png")
+    
+    headers = {"Content-Disposition": f"attachment; filename=edited.{output_format.lower()}"}
+    return StreamingResponse(
+        io.BytesIO(result),
+        media_type=mime,
+        headers=headers,
+    )
 
 
 # =============================================================================
