@@ -1004,19 +1004,10 @@ async def ppt_to_pdf(file: UploadFile = File(...)):
         file_size_mb = len(buffer) / (1024 * 1024)
         print(f"[PPT→PDF] Received file: {file.filename}, size: {file_size_mb:.2f} MB")
         
-        # Check file size limit (Railway free tier has ~30s timeout)
-        if file_size_mb > 10:
-            raise HTTPException(
-                status_code=413, 
-                detail=f"File too large ({file_size_mb:.1f} MB). Maximum size is 10 MB for PDF conversion."
-            )
-        
-        # Run conversion directly (ThreadPoolExecutor was causing issues)
+        # Convert (large files will be automatically chunked)
         result = PowerPointToPDFConverter.convert(buffer)
                 
         print(f"[PPT→PDF] Conversion successful, PDF size: {len(result) / (1024 * 1024):.2f} MB")
-    except HTTPException:
-        raise
     except ConversionError as exc:
         print(f"[PPT→PDF] ConversionError: {exc}")
         raise HTTPException(status_code=400, detail=str(exc))

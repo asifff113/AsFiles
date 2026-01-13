@@ -600,9 +600,9 @@ class PowerPointToPDFConverter:
         Convert PowerPoint to PDF using the best available method.
         
         Strategy:
-        1. Try LibreOffice first (free, unlimited)
-        2. For small files (<5MB): use HYBRID fix if blank pages detected
-        3. For large files: skip hybrid fix to avoid timeout
+        1. For large files (>5MB): Split into chunks, convert each, merge PDFs
+        2. Try LibreOffice first (free, unlimited)
+        3. If any blank pages detected, use HYBRID approach
         4. CloudConvert as final fallback (limited quota)
         
         Set PPTX_CONVERT_METHOD env var to force: 'libreoffice', 'cloudconvert', 'hybrid', 'sliderender'
@@ -628,6 +628,16 @@ class PowerPointToPDFConverter:
         elif forced_method == 'hybrid':
             return PowerPointToPDFConverter._convert_hybrid(buffer)
         
+        # For large files (>5MB), use chunked conversion to avoid timeout
+        if file_size_mb > 5.0:
+            try:
+                print(f"[PPTX→PDF] Large file ({file_size_mb:.1f}MB), using chunked conversion...")
+                result = PowerPointToPDFConverter._convert_chunked(buffer)
+                print("[PPTX→PDF] Chunked conversion succeeded!")
+                return result
+            except Exception as e:
+                print(f"[PPTX→PDF] Chunked conversion failed: {e}, trying direct...")
+        
         # Auto mode: Try LibreOffice first (free, unlimited)
         try:
             print("[PPTX→PDF] Trying LibreOffice...")
@@ -639,11 +649,6 @@ class PowerPointToPDFConverter:
             
             # LibreOffice produced some blank pages
             print(f"[PPTX→PDF] LibreOffice produced {len(blank_pages)} blank pages: {blank_pages}")
-            
-            # For large files, skip hybrid fix to avoid timeout - just return LibreOffice result
-            if file_size_mb > 5.0:
-                print(f"[PPTX→PDF] Large file - skipping hybrid fix to avoid timeout, returning LibreOffice result")
-                return result
             
             # For smaller files, try hybrid fix
             print("[PPTX→PDF] Attempting hybrid fix (re-render blank pages)...")
@@ -1216,6 +1221,157 @@ class PowerPointToPDFConverter:
                 os.rmdir(temp_dir)
             except:
                 pass
+    
+    @staticmethod
+    def _convert_chunked(buffer: bytes, slides_per_chunk: int = 10) -> bytes:
+        """
+        Convert large PPTX by splitting into chunks, converting each, then merging PDFs.
+        This avoids timeout issues with large files.
+        
+        Args:
+            buffer: PPTX file bytes
+            slides_per_chunk: Number of slides per chunk (default 10)
+            
+        Returns:
+            bytes: Merged PDF data
+        """
+        from pptx import Presentation
+        import fitz  # PyMuPDF for PDF merging
+        
+        print(f"[ChunkedConvert] Starting chunked conversion with {slides_per_chunk} slides per chunk...")
+        
+        # Load the presentation
+        prs = Presentation(io.BytesIO(buffer))
+        total_slides = len(prs.slides)
+        print(f"[ChunkedConvert] Total slides: {total_slides}")
+        
+        if total_slides <= slides_per_chunk:
+            # Small enough to convert directly
+            print("[ChunkedConvert] File small enough, converting directly...")
+            result, _ = PowerPointToPDFConverter._convert_with_libreoffice(buffer, strict=False, return_blank_info=True)
+            return result
+        
+        # Calculate chunks
+        num_chunks = (total_slides + slides_per_chunk - 1) // slides_per_chunk
+        print(f"[ChunkedConvert] Splitting into {num_chunks} chunks...")
+        
+        # Split presentation into chunks
+        chunk_pdfs = []
+        
+        for chunk_idx in range(num_chunks):
+            start_slide = chunk_idx * slides_per_chunk
+            end_slide = min((chunk_idx + 1) * slides_per_chunk, total_slides)
+            
+            print(f"[ChunkedConvert] Processing chunk {chunk_idx + 1}/{num_chunks} (slides {start_slide + 1}-{end_slide})...")
+            
+            # Create a new presentation with just these slides
+            chunk_pptx = PowerPointToPDFConverter._extract_slides(buffer, start_slide, end_slide)
+            
+            # Convert chunk to PDF
+            try:
+                chunk_pdf, _ = PowerPointToPDFConverter._convert_with_libreoffice(chunk_pptx, strict=False, return_blank_info=True)
+                chunk_pdfs.append(chunk_pdf)
+                print(f"[ChunkedConvert] Chunk {chunk_idx + 1} converted: {len(chunk_pdf)} bytes")
+            except Exception as e:
+                print(f"[ChunkedConvert] Chunk {chunk_idx + 1} failed: {e}")
+                raise
+        
+        # Merge all PDFs
+        print(f"[ChunkedConvert] Merging {len(chunk_pdfs)} PDF chunks...")
+        merged_pdf = PowerPointToPDFConverter._merge_pdfs(chunk_pdfs)
+        print(f"[ChunkedConvert] Final PDF: {len(merged_pdf)} bytes")
+        
+        return merged_pdf
+    
+    @staticmethod
+    def _extract_slides(buffer: bytes, start: int, end: int) -> bytes:
+        """
+        Extract a range of slides from a PPTX into a new PPTX.
+        
+        Args:
+            buffer: Original PPTX bytes
+            start: Start slide index (0-based, inclusive)
+            end: End slide index (0-based, exclusive)
+            
+        Returns:
+            bytes: New PPTX with only the specified slides
+        """
+        from pptx import Presentation
+        from copy import deepcopy
+        
+        # Load source presentation
+        src_prs = Presentation(io.BytesIO(buffer))
+        
+        # Create new presentation with same slide size
+        new_prs = Presentation()
+        new_prs.slide_width = src_prs.slide_width
+        new_prs.slide_height = src_prs.slide_height
+        
+        # Get blank layout
+        blank_layout = new_prs.slide_layouts[6] if len(new_prs.slide_layouts) > 6 else new_prs.slide_layouts[-1]
+        
+        # Copy specified slides
+        for slide_idx in range(start, end):
+            if slide_idx >= len(src_prs.slides):
+                break
+                
+            src_slide = src_prs.slides[slide_idx]
+            new_slide = new_prs.slides.add_slide(blank_layout)
+            
+            # Copy shapes
+            for shape in src_slide.shapes:
+                try:
+                    # Handle pictures
+                    if hasattr(shape, 'image'):
+                        try:
+                            image_blob = shape.image.blob
+                            new_slide.shapes.add_picture(
+                                io.BytesIO(image_blob),
+                                shape.left,
+                                shape.top,
+                                shape.width,
+                                shape.height,
+                            )
+                            continue
+                        except:
+                            pass
+                    
+                    # Copy other shapes via element
+                    new_element = deepcopy(shape.element)
+                    new_slide.shapes._spTree.insert_element_before(new_element, "p:extLst")
+                except Exception as e:
+                    pass  # Skip shapes that can't be copied
+        
+        # Save to bytes
+        output = io.BytesIO()
+        new_prs.save(output)
+        return output.getvalue()
+    
+    @staticmethod
+    def _merge_pdfs(pdf_list: list) -> bytes:
+        """
+        Merge multiple PDFs into one.
+        
+        Args:
+            pdf_list: List of PDF bytes
+            
+        Returns:
+            bytes: Merged PDF
+        """
+        import fitz  # PyMuPDF
+        
+        merged_doc = fitz.open()
+        
+        for pdf_bytes in pdf_list:
+            pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            merged_doc.insert_pdf(pdf_doc)
+            pdf_doc.close()
+        
+        output = io.BytesIO()
+        merged_doc.save(output)
+        merged_doc.close()
+        
+        return output.getvalue()
     
     @staticmethod
     def _convert_with_libreoffice(buffer: bytes, strict: bool = True, return_blank_info: bool = False):
