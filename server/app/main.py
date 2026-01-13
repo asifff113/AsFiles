@@ -1001,11 +1001,29 @@ async def ppt_to_pdf(file: UploadFile = File(...)):
     
     try:
         buffer = await file.read()
-        result = PowerPointToPDFConverter.convert(buffer)
+        file_size_mb = len(buffer) / (1024 * 1024)
+        print(f"[PPT→PDF] Received file: {filename}, size: {file_size_mb:.2f} MB")
+        
+        # Run conversion in thread pool to avoid blocking
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(PowerPointToPDFConverter.convert, buffer)
+            try:
+                # Timeout after 120 seconds for large files
+                result = future.result(timeout=120)
+            except concurrent.futures.TimeoutError:
+                print(f"[PPT→PDF] Conversion timed out after 120 seconds")
+                raise ConversionError("Conversion timed out. File may be too large.")
+                
+        print(f"[PPT→PDF] Conversion successful, PDF size: {len(result) / (1024 * 1024):.2f} MB")
     except ConversionError as exc:
+        print(f"[PPT→PDF] ConversionError: {exc}")
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail="Conversion failed.")
+        print(f"[PPT→PDF] Unexpected error: {exc}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Conversion failed: {str(exc)}")
     
     headers = {"Content-Disposition": "attachment; filename=presentation.pdf"}
     return StreamingResponse(
