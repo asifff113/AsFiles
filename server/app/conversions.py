@@ -600,10 +600,10 @@ class PowerPointToPDFConverter:
         Convert PowerPoint to PDF using the best available method.
         
         Strategy:
-        1. For large files (>5MB), use CloudConvert first (faster, avoids timeout)
-        2. Try LibreOffice for smaller files (free, unlimited)
-        3. If any blank pages detected, use HYBRID approach
-        4. CloudConvert as final fallback
+        1. Try LibreOffice first (free, unlimited)
+        2. For small files (<5MB): use HYBRID fix if blank pages detected
+        3. For large files: skip hybrid fix to avoid timeout
+        4. CloudConvert as final fallback (limited quota)
         
         Set PPTX_CONVERT_METHOD env var to force: 'libreoffice', 'cloudconvert', 'hybrid', 'sliderender'
         """
@@ -628,17 +628,7 @@ class PowerPointToPDFConverter:
         elif forced_method == 'hybrid':
             return PowerPointToPDFConverter._convert_hybrid(buffer)
         
-        # Auto mode: Large files (>5MB) go to CloudConvert first to avoid timeout
-        if file_size_mb > 5.0 and cloudconvert_key:
-            print(f"[PPTX→PDF] Large file ({file_size_mb:.1f}MB), using CloudConvert for speed...")
-            try:
-                result = PowerPointToPDFConverter._convert_with_cloudconvert(buffer, cloudconvert_key)
-                print("[PPTX→PDF] CloudConvert succeeded!")
-                return result
-            except Exception as e:
-                print(f"[PPTX→PDF] CloudConvert failed: {e}, falling back to LibreOffice...")
-        
-        # Standard flow: Try LibreOffice, then hybrid fix
+        # Auto mode: Try LibreOffice first (free, unlimited)
         try:
             print("[PPTX→PDF] Trying LibreOffice...")
             result, blank_pages = PowerPointToPDFConverter._convert_with_libreoffice(buffer, strict=False, return_blank_info=True)
@@ -647,8 +637,15 @@ class PowerPointToPDFConverter:
                 print("[PPTX→PDF] LibreOffice succeeded with all pages valid!")
                 return result
             
-            # LibreOffice produced some blank pages - try hybrid fix
+            # LibreOffice produced some blank pages
             print(f"[PPTX→PDF] LibreOffice produced {len(blank_pages)} blank pages: {blank_pages}")
+            
+            # For large files, skip hybrid fix to avoid timeout - just return LibreOffice result
+            if file_size_mb > 5.0:
+                print(f"[PPTX→PDF] Large file - skipping hybrid fix to avoid timeout, returning LibreOffice result")
+                return result
+            
+            # For smaller files, try hybrid fix
             print("[PPTX→PDF] Attempting hybrid fix (re-render blank pages)...")
             
             try:
