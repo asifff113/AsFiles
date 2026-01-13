@@ -22,6 +22,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from PIL import Image
 import pikepdf
+import fitz  # PyMuPDF for image compression
 
 
 class PDFError(Exception):
@@ -127,31 +128,156 @@ class PDFCompressor:
     @staticmethod
     def compress(
         buffer: bytes, 
-        quality: Literal["low", "medium", "high"] = "medium"
+        compression_level: int = 50,
+        mode: str = "smart"
     ) -> bytes:
-        """Compress a PDF file with specified quality level."""
-        quality_settings = {
-            "low": {"image_quality": 30, "resolution": 72},
-            "medium": {"image_quality": 50, "resolution": 120},
-            "high": {"image_quality": 75, "resolution": 150},
-        }
+        """
+        Compress a PDF file with specified compression level.
         
-        settings = quality_settings.get(quality, quality_settings["medium"])
+        Args:
+            buffer: PDF file bytes
+            compression_level: 1-100 where 1 = max compression (smallest file, lowest quality)
+                              and 100 = min compression (larger file, best quality)
+            mode: "smart" = compress images only, keep text selectable
+                  "aggressive" = convert pages to images (maximum compression)
+        """
+        # Clamp compression level between 1 and 100
+        compression_level = max(1, min(100, compression_level))
+        original_size = len(buffer)
+        
+        # Map compression level to JPEG quality (10-90)
+        image_quality = int(10 + (compression_level / 100) * 80)  # 10-90 quality
         
         try:
-            # Use pikepdf for better compression
-            with pikepdf.open(io.BytesIO(buffer)) as pdf:
-                # Remove unused objects and compress streams
-                pdf.remove_unreferenced_resources()
-                
-                output = io.BytesIO()
-                pdf.save(
-                    output,
-                    compress_streams=True,
-                    object_stream_mode=pikepdf.ObjectStreamMode.generate,
-                    recompress_flate=True,
-                )
-                return output.getvalue()
+            results = []
+            
+            # Method 1: Smart compression - compress only embedded images
+            if mode == "smart":
+                try:
+                    doc = fitz.open(stream=buffer, filetype="pdf")
+                    
+                    for page_num in range(len(doc)):
+                        page = doc[page_num]
+                        image_list = page.get_images(full=True)
+                        
+                        for img_info in image_list:
+                            xref = img_info[0]
+                            
+                            try:
+                                # Extract image
+                                base_image = doc.extract_image(xref)
+                                if not base_image:
+                                    continue
+                                
+                                image_bytes = base_image["image"]
+                                
+                                # Skip small images
+                                if len(image_bytes) < 5000:
+                                    continue
+                                
+                                # Open with PIL
+                                pil_image = Image.open(io.BytesIO(image_bytes))
+                                
+                                # Convert to RGB for JPEG
+                                if pil_image.mode in ('RGBA', 'P', 'LA'):
+                                    background = Image.new('RGB', pil_image.size, (255, 255, 255))
+                                    if pil_image.mode == 'P':
+                                        pil_image = pil_image.convert('RGBA')
+                                    if pil_image.mode in ('RGBA', 'LA'):
+                                        background.paste(pil_image, mask=pil_image.split()[-1])
+                                    pil_image = background
+                                elif pil_image.mode != 'RGB':
+                                    pil_image = pil_image.convert('RGB')
+                                
+                                # Resize large images based on compression level
+                                max_dim = int(800 + (compression_level / 100) * 2200)  # 800-3000px
+                                orig_w, orig_h = pil_image.size
+                                if orig_w > max_dim or orig_h > max_dim:
+                                    ratio = min(max_dim / orig_w, max_dim / orig_h)
+                                    new_size = (int(orig_w * ratio), int(orig_h * ratio))
+                                    pil_image = pil_image.resize(new_size, Image.Resampling.LANCZOS)
+                                
+                                # Compress to JPEG
+                                compressed_io = io.BytesIO()
+                                pil_image.save(compressed_io, format='JPEG', quality=image_quality, optimize=True)
+                                compressed_bytes = compressed_io.getvalue()
+                                
+                                # Only replace if smaller
+                                if len(compressed_bytes) < len(image_bytes) * 0.85:
+                                    page.replace_image(xref, stream=compressed_bytes)
+                            except Exception:
+                                continue
+                    
+                    # Save with garbage collection
+                    smart_output = io.BytesIO()
+                    doc.save(smart_output, garbage=4, deflate=True, clean=True)
+                    doc.close()
+                    
+                    smart_result = smart_output.getvalue()
+                    results.append((smart_result, "smart"))
+                except Exception:
+                    pass
+            
+            # Method 2: Aggressive - convert pages to images (for mode="aggressive" or as fallback)
+            if mode == "aggressive" or not results:
+                try:
+                    dpi = int(72 + (compression_level / 100) * 128)  # 72-200 DPI
+                    
+                    original_doc = fitz.open(stream=buffer, filetype="pdf")
+                    new_doc = fitz.open()
+                    
+                    for page_num in range(len(original_doc)):
+                        page = original_doc[page_num]
+                        rect = page.rect
+                        
+                        zoom = dpi / 72.0
+                        mat = fitz.Matrix(zoom, zoom)
+                        pix = page.get_pixmap(matrix=mat, alpha=False)
+                        img_data = pix.tobytes("jpeg", jpg_quality=image_quality)
+                        
+                        new_page = new_doc.new_page(width=rect.width, height=rect.height)
+                        new_page.insert_image(rect, stream=img_data)
+                    
+                    aggressive_output = io.BytesIO()
+                    new_doc.save(aggressive_output, garbage=4, deflate=True, clean=True)
+                    new_doc.close()
+                    original_doc.close()
+                    
+                    aggressive_result = aggressive_output.getvalue()
+                    results.append((aggressive_result, "aggressive"))
+                except Exception:
+                    pass
+            
+            # Method 3: pikepdf stream optimization
+            try:
+                with pikepdf.open(io.BytesIO(buffer)) as pdf:
+                    pdf.remove_unreferenced_resources()
+                    pikepdf_output = io.BytesIO()
+                    pdf.save(
+                        pikepdf_output,
+                        compress_streams=True,
+                        object_stream_mode=pikepdf.ObjectStreamMode.generate,
+                        recompress_flate=True,
+                    )
+                    pikepdf_result = pikepdf_output.getvalue()
+                    results.append((pikepdf_result, "pikepdf"))
+            except Exception:
+                pass
+            
+            if not results:
+                raise PDFError("All compression methods failed")
+            
+            # Filter to results smaller than original
+            smaller_results = [(r, name) for r, name in results if len(r) < original_size]
+            
+            if smaller_results:
+                # Return the smallest one
+                best_result = min(smaller_results, key=lambda x: len(x[0]))
+                return best_result[0]
+            else:
+                # Return original if nothing helped
+                return buffer
+                    
         except Exception as e:
             raise PDFError(f"Compression failed: {e}")
 

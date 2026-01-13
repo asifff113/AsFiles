@@ -236,15 +236,28 @@ async def split_pdf_range(
 @app.post("/api/pdf/compress")
 async def compress_pdf(
     file: UploadFile = File(...),
-    quality: Literal["low", "medium", "high"] = Form("medium"),
+    compression_level: int = Form(50),
+    mode: str = Form("smart"),
 ):
-    """Compress a PDF file."""
+    """
+    Compress a PDF file.
+    
+    Args:
+        file: PDF file to compress
+        compression_level: 1-100 where 1 = maximum compression (smallest file)
+                          and 100 = minimum compression (best quality)
+        mode: "smart" = compress images only, keep text selectable
+              "aggressive" = convert pages to images for maximum compression
+    """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="File must be a PDF")
     
+    if mode not in ("smart", "aggressive"):
+        mode = "smart"
+    
     try:
         buffer = await file.read()
-        result = PDFCompressor.compress(buffer, quality)
+        result = PDFCompressor.compress(buffer, compression_level, mode)
     except PDFError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:

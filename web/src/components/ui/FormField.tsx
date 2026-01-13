@@ -53,12 +53,13 @@ export const FormField = ({ field, value, onChange }: FormFieldProps) => {
       );
     
     case "range":
+      const isCompression = field.name === "compression_level";
       return (
         <div>
           <div className="flex justify-between items-center mb-2">
             <label htmlFor={id} className={labelStyles}>{field.label}</label>
-            <span className="text-xs bg-white/10 px-2 py-0.5 rounded text-gray-300">
-              {value}
+            <span className="text-xs bg-white/10 px-2 py-0.5 rounded text-gray-300 font-medium">
+              {value}{isCompression ? '%' : ''}
             </span>
           </div>
           <input
@@ -71,6 +72,12 @@ export const FormField = ({ field, value, onChange }: FormFieldProps) => {
             onChange={(e) => onChange(field.name, parseFloat(e.target.value))}
             className="w-full h-2 bg-black/30 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-primary hover:[&::-webkit-slider-thumb]:bg-primary/80"
           />
+          {isCompression && (
+            <div className="flex justify-between text-[10px] text-gray-500 mt-1 px-0.5">
+              <span>⬇️ Smaller file</span>
+              <span>Better quality ⬆️</span>
+            </div>
+          )}
         </div>
       );
     
