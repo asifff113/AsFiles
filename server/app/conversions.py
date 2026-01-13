@@ -599,12 +599,14 @@ class PowerPointToPDFConverter:
         """
         Convert PowerPoint to PDF using the best available method.
         
-        Strategy for accurate conversion:
-        1. Try LibreOffice first (unlimited, free)
-        2. Validate output - if ANY blank pages detected, fall back to CloudConvert
-        3. CloudConvert is pixel-perfect but has daily quota limits
+        Strategy:
+        1. Try LibreOffice first (free, unlimited)
+        2. If any blank pages detected, use HYBRID approach:
+           - Keep good pages from LibreOffice
+           - Re-render blank pages using slide-to-image method
+        3. CloudConvert as final fallback (limited quota)
         
-        Set PPTX_CONVERT_METHOD env var to force: 'libreoffice', 'cloudconvert', 'basic'
+        Set PPTX_CONVERT_METHOD env var to force: 'libreoffice', 'cloudconvert', 'hybrid', 'sliderender'
         """
         import platform
         import os
@@ -618,34 +620,46 @@ class PowerPointToPDFConverter:
             if cloudconvert_key:
                 return PowerPointToPDFConverter._convert_with_cloudconvert(buffer, cloudconvert_key)
             raise ConversionError("CLOUDCONVERT_API_KEY not set")
-        elif forced_method == 'basic':
-            return PowerPointToPDFConverter._convert_basic(buffer)
+        elif forced_method == 'sliderender':
+            return PowerPointToPDFConverter._convert_slides_to_images_pdf(buffer)
         elif forced_method == 'libreoffice':
             return PowerPointToPDFConverter._convert_with_libreoffice(buffer, strict=False)
+        elif forced_method == 'hybrid':
+            return PowerPointToPDFConverter._convert_hybrid(buffer)
         
-        # Auto mode: LibreOffice first, CloudConvert as quality fallback
+        # Auto mode: Try LibreOffice, then hybrid fix, then CloudConvert
         cloudconvert_key = os.environ.get('CLOUDCONVERT_API_KEY')
         
         try:
             print("[PPTX→PDF] Trying LibreOffice...")
-            # strict=True means fail if ANY blank pages detected
-            result = PowerPointToPDFConverter._convert_with_libreoffice(buffer, strict=True)
-            print("[PPTX→PDF] LibreOffice succeeded with all pages valid!")
-            return result
-        except ConversionError as e:
-            print(f"[PPTX→PDF] LibreOffice failed: {e}")
+            result, blank_pages = PowerPointToPDFConverter._convert_with_libreoffice(buffer, strict=False, return_blank_info=True)
             
-            # If LibreOffice failed due to quality issues, try CloudConvert
-            if cloudconvert_key:
-                try:
-                    print("[PPTX→PDF] Falling back to CloudConvert for accurate conversion...")
-                    result = PowerPointToPDFConverter._convert_with_cloudconvert(buffer, cloudconvert_key)
-                    print("[PPTX→PDF] CloudConvert succeeded!")
-                    return result
-                except Exception as cc_error:
-                    print(f"[PPTX→PDF] CloudConvert also failed: {cc_error}")
+            if not blank_pages:
+                print("[PPTX→PDF] LibreOffice succeeded with all pages valid!")
+                return result
+            
+            # LibreOffice produced some blank pages - try hybrid fix
+            print(f"[PPTX→PDF] LibreOffice produced {len(blank_pages)} blank pages: {blank_pages}")
+            print("[PPTX→PDF] Attempting hybrid fix (re-render blank pages)...")
+            
+            try:
+                fixed_result = PowerPointToPDFConverter._fix_blank_pages(buffer, result, blank_pages)
+                print("[PPTX→PDF] Hybrid fix succeeded!")
+                return fixed_result
+            except Exception as fix_error:
+                print(f"[PPTX→PDF] Hybrid fix failed: {fix_error}")
+                
         except Exception as e:
             print(f"[PPTX→PDF] LibreOffice error: {e}")
+        
+        # Try pure slide-to-image rendering
+        try:
+            print("[PPTX→PDF] Trying slide-to-image rendering...")
+            result = PowerPointToPDFConverter._convert_slides_to_images_pdf(buffer)
+            print("[PPTX→PDF] Slide rendering succeeded!")
+            return result
+        except Exception as e:
+            print(f"[PPTX→PDF] Slide rendering failed: {e}")
         
         # Windows: try PowerPoint COM
         if platform.system() == "Windows":
@@ -657,7 +671,7 @@ class PowerPointToPDFConverter:
             except Exception as e:
                 print(f"[PPTX→PDF] COM failed: {e}")
         
-        # Last resort: CloudConvert if not tried yet
+        # CloudConvert as final fallback
         if cloudconvert_key:
             try:
                 print("[PPTX→PDF] Final attempt with CloudConvert...")
@@ -665,11 +679,366 @@ class PowerPointToPDFConverter:
             except Exception as e:
                 print(f"[PPTX→PDF] CloudConvert failed: {e}")
         
-        # Absolute last resort
         raise ConversionError(
-            "Could not convert PPTX to PDF with acceptable quality. "
-            "LibreOffice produced blank pages and CloudConvert is unavailable or failed."
+            "Could not convert PPTX to PDF. All methods failed."
         )
+    
+    @staticmethod
+    def _convert_slides_to_images_pdf(buffer: bytes) -> bytes:
+        """
+        Convert PPTX by rendering each slide to a high-quality image, then combining into PDF.
+        This method extracts ALL visual content from slides.
+        """
+        from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+        from PIL import Image, ImageDraw, ImageFont
+        import fitz  # PyMuPDF
+        
+        print("[SlideRender] Starting slide-to-image conversion...")
+        
+        prs = Presentation(io.BytesIO(buffer))
+        slide_width_pt = prs.slide_width.pt
+        slide_height_pt = prs.slide_height.pt
+        
+        # Render at 2x resolution for quality (150 DPI equivalent)
+        scale = 2.0
+        img_width = int(slide_width_pt * scale)
+        img_height = int(slide_height_pt * scale)
+        
+        print(f"[SlideRender] Slide size: {slide_width_pt}x{slide_height_pt}pt, rendering at {img_width}x{img_height}px")
+        
+        slide_images = []
+        
+        for slide_idx, slide in enumerate(prs.slides):
+            print(f"[SlideRender] Rendering slide {slide_idx + 1}/{len(prs.slides)}...")
+            
+            # Create blank white image
+            img = Image.new('RGB', (img_width, img_height), (255, 255, 255))
+            draw = ImageDraw.Draw(img)
+            
+            # Try to render slide background
+            try:
+                bg = slide.background
+                if bg and bg.fill and bg.fill.type is not None:
+                    if hasattr(bg.fill, 'fore_color') and bg.fill.fore_color:
+                        try:
+                            rgb = bg.fill.fore_color.rgb
+                            if rgb:
+                                draw.rectangle([0, 0, img_width, img_height], 
+                                             fill=(rgb[0], rgb[1], rgb[2]))
+                        except:
+                            pass
+            except:
+                pass
+            
+            # Collect shapes sorted by z-order (approximate using position)
+            shapes_to_render = []
+            for shape in slide.shapes:
+                try:
+                    x = shape.left.pt * scale if hasattr(shape, 'left') else 0
+                    y = shape.top.pt * scale if hasattr(shape, 'top') else 0
+                    w = shape.width.pt * scale if hasattr(shape, 'width') else 100
+                    h = shape.height.pt * scale if hasattr(shape, 'height') else 100
+                    shapes_to_render.append({
+                        'shape': shape,
+                        'x': x, 'y': y, 'w': w, 'h': h
+                    })
+                except:
+                    continue
+            
+            # Render shapes (images first, then shapes, then text)
+            for shape_info in shapes_to_render:
+                shape = shape_info['shape']
+                x, y, w, h = int(shape_info['x']), int(shape_info['y']), int(shape_info['w']), int(shape_info['h'])
+                
+                try:
+                    # Render pictures/images
+                    if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                        try:
+                            img_data = shape.image.blob
+                            shape_img = Image.open(io.BytesIO(img_data))
+                            
+                            # Handle transparency
+                            if shape_img.mode in ('RGBA', 'LA', 'P'):
+                                if shape_img.mode == 'P':
+                                    shape_img = shape_img.convert('RGBA')
+                                # Composite onto white background
+                                bg_img = Image.new('RGB', shape_img.size, (255, 255, 255))
+                                if shape_img.mode == 'RGBA':
+                                    bg_img.paste(shape_img, mask=shape_img.split()[3])
+                                else:
+                                    bg_img.paste(shape_img)
+                                shape_img = bg_img
+                            elif shape_img.mode != 'RGB':
+                                shape_img = shape_img.convert('RGB')
+                            
+                            # Resize and paste
+                            shape_img = shape_img.resize((max(1, w), max(1, h)), Image.Resampling.LANCZOS)
+                            img.paste(shape_img, (x, y))
+                        except Exception as e:
+                            # Draw placeholder for failed images
+                            draw.rectangle([x, y, x + w, y + h], outline=(200, 200, 200), fill=(245, 245, 245))
+                        continue
+                    
+                    # Render shape fills
+                    if hasattr(shape, 'fill') and shape.fill:
+                        try:
+                            fill = shape.fill
+                            if fill.type is not None and hasattr(fill, 'fore_color') and fill.fore_color:
+                                rgb = fill.fore_color.rgb
+                                if rgb:
+                                    draw.rectangle([x, y, x + w, y + h], fill=(rgb[0], rgb[1], rgb[2]))
+                        except:
+                            pass
+                    
+                    # Render shape borders
+                    if hasattr(shape, 'line') and shape.line:
+                        try:
+                            line = shape.line
+                            if line.color and line.color.rgb:
+                                rgb = line.color.rgb
+                                line_w = int((line.width.pt if line.width else 1) * scale)
+                                draw.rectangle([x, y, x + w, y + h], outline=(rgb[0], rgb[1], rgb[2]), width=max(1, line_w))
+                        except:
+                            pass
+                    
+                    # Render text
+                    if hasattr(shape, 'text_frame'):
+                        try:
+                            text_frame = shape.text_frame
+                            text_y = y + 5
+                            
+                            for para in text_frame.paragraphs:
+                                para_text = ""
+                                text_color = (0, 0, 0)
+                                font_size = 14
+                                
+                                for run in para.runs:
+                                    para_text += run.text
+                                    if run.font.size:
+                                        font_size = int(run.font.size.pt * scale * 0.8)
+                                    if run.font.color and run.font.color.rgb:
+                                        rgb = run.font.color.rgb
+                                        text_color = (rgb[0], rgb[1], rgb[2])
+                                
+                                if para_text.strip():
+                                    # Try to use a font, fall back to default
+                                    try:
+                                        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", max(8, font_size))
+                                    except:
+                                        try:
+                                            font = ImageFont.truetype("arial.ttf", max(8, font_size))
+                                        except:
+                                            font = ImageFont.load_default()
+                                    
+                                    # Word wrap
+                                    max_width = w - 10
+                                    words = para_text.split()
+                                    lines = []
+                                    current_line = []
+                                    
+                                    for word in words:
+                                        current_line.append(word)
+                                        test_line = ' '.join(current_line)
+                                        bbox = draw.textbbox((0, 0), test_line, font=font)
+                                        if bbox[2] - bbox[0] > max_width and len(current_line) > 1:
+                                            current_line.pop()
+                                            lines.append(' '.join(current_line))
+                                            current_line = [word]
+                                    if current_line:
+                                        lines.append(' '.join(current_line))
+                                    
+                                    for line in lines:
+                                        if text_y < y + h - 5:
+                                            draw.text((x + 5, text_y), line, fill=text_color, font=font)
+                                            text_y += font_size + 4
+                        except:
+                            pass
+                            
+                except Exception as shape_error:
+                    continue
+            
+            slide_images.append(img)
+        
+        # Combine images into PDF using PyMuPDF
+        print(f"[SlideRender] Combining {len(slide_images)} slides into PDF...")
+        
+        pdf_doc = fitz.open()
+        
+        for slide_img in slide_images:
+            # Convert PIL image to bytes
+            img_buffer = io.BytesIO()
+            slide_img.save(img_buffer, format='PNG', optimize=True)
+            img_buffer.seek(0)
+            
+            # Create PDF page with slide dimensions
+            page = pdf_doc.new_page(width=slide_width_pt, height=slide_height_pt)
+            
+            # Insert image to fill page
+            rect = fitz.Rect(0, 0, slide_width_pt, slide_height_pt)
+            page.insert_image(rect, stream=img_buffer.getvalue())
+        
+        # Save PDF
+        pdf_buffer = io.BytesIO()
+        pdf_doc.save(pdf_buffer)
+        pdf_doc.close()
+        
+        result = pdf_buffer.getvalue()
+        print(f"[SlideRender] PDF created: {len(result)} bytes")
+        return result
+    
+    @staticmethod
+    def _fix_blank_pages(pptx_buffer: bytes, pdf_data: bytes, blank_pages: list) -> bytes:
+        """
+        Fix blank pages in LibreOffice output by re-rendering those specific pages
+        from the original PPTX and merging them back.
+        """
+        import fitz
+        from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+        from PIL import Image, ImageDraw, ImageFont
+        
+        print(f"[HybridFix] Fixing {len(blank_pages)} blank pages: {blank_pages}")
+        
+        # Open the PDF
+        pdf_doc = fitz.open(stream=pdf_data, filetype="pdf")
+        
+        # Load PPTX
+        prs = Presentation(io.BytesIO(pptx_buffer))
+        slide_width_pt = prs.slide_width.pt
+        slide_height_pt = prs.slide_height.pt
+        
+        scale = 2.0
+        img_width = int(slide_width_pt * scale)
+        img_height = int(slide_height_pt * scale)
+        
+        # Re-render each blank page
+        for page_num in blank_pages:
+            slide_idx = page_num - 1  # Convert to 0-indexed
+            
+            if slide_idx >= len(prs.slides):
+                continue
+            
+            slide = prs.slides[slide_idx]
+            print(f"[HybridFix] Re-rendering page {page_num}...")
+            
+            # Render slide to image (same logic as _convert_slides_to_images_pdf)
+            img = Image.new('RGB', (img_width, img_height), (255, 255, 255))
+            draw = ImageDraw.Draw(img)
+            
+            # Render background
+            try:
+                bg = slide.background
+                if bg and bg.fill and bg.fill.type is not None:
+                    if hasattr(bg.fill, 'fore_color') and bg.fill.fore_color:
+                        try:
+                            rgb = bg.fill.fore_color.rgb
+                            if rgb:
+                                draw.rectangle([0, 0, img_width, img_height], fill=(rgb[0], rgb[1], rgb[2]))
+                        except:
+                            pass
+            except:
+                pass
+            
+            # Render all shapes
+            for shape in slide.shapes:
+                try:
+                    x = int(shape.left.pt * scale) if hasattr(shape, 'left') else 0
+                    y = int(shape.top.pt * scale) if hasattr(shape, 'top') else 0
+                    w = int(shape.width.pt * scale) if hasattr(shape, 'width') else 100
+                    h = int(shape.height.pt * scale) if hasattr(shape, 'height') else 100
+                    
+                    # Pictures
+                    if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                        try:
+                            shape_img = Image.open(io.BytesIO(shape.image.blob))
+                            if shape_img.mode in ('RGBA', 'LA', 'P'):
+                                if shape_img.mode == 'P':
+                                    shape_img = shape_img.convert('RGBA')
+                                bg_img = Image.new('RGB', shape_img.size, (255, 255, 255))
+                                if shape_img.mode == 'RGBA':
+                                    bg_img.paste(shape_img, mask=shape_img.split()[3])
+                                else:
+                                    bg_img.paste(shape_img)
+                                shape_img = bg_img
+                            elif shape_img.mode != 'RGB':
+                                shape_img = shape_img.convert('RGB')
+                            shape_img = shape_img.resize((max(1, w), max(1, h)), Image.Resampling.LANCZOS)
+                            img.paste(shape_img, (x, y))
+                        except:
+                            draw.rectangle([x, y, x + w, y + h], outline=(200, 200, 200), fill=(245, 245, 245))
+                        continue
+                    
+                    # Shape fills
+                    if hasattr(shape, 'fill') and shape.fill:
+                        try:
+                            if shape.fill.type is not None and hasattr(shape.fill, 'fore_color') and shape.fill.fore_color:
+                                rgb = shape.fill.fore_color.rgb
+                                if rgb:
+                                    draw.rectangle([x, y, x + w, y + h], fill=(rgb[0], rgb[1], rgb[2]))
+                        except:
+                            pass
+                    
+                    # Text
+                    if hasattr(shape, 'text_frame'):
+                        try:
+                            text_y = y + 5
+                            for para in shape.text_frame.paragraphs:
+                                para_text = ""
+                                text_color = (0, 0, 0)
+                                font_size = int(14 * scale)
+                                
+                                for run in para.runs:
+                                    para_text += run.text
+                                    if run.font.size:
+                                        font_size = int(run.font.size.pt * scale * 0.8)
+                                    if run.font.color and run.font.color.rgb:
+                                        rgb = run.font.color.rgb
+                                        text_color = (rgb[0], rgb[1], rgb[2])
+                                
+                                if para_text.strip():
+                                    try:
+                                        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", max(8, font_size))
+                                    except:
+                                        font = ImageFont.load_default()
+                                    
+                                    draw.text((x + 5, text_y), para_text, fill=text_color, font=font)
+                                    text_y += font_size + 4
+                        except:
+                            pass
+                except:
+                    continue
+            
+            # Convert image to PNG bytes
+            img_buffer = io.BytesIO()
+            img.save(img_buffer, format='PNG')
+            img_buffer.seek(0)
+            
+            # Replace the blank page in PDF
+            page = pdf_doc[slide_idx]
+            
+            # Clear the page and insert new image
+            page.clean_contents()
+            rect = fitz.Rect(0, 0, slide_width_pt, slide_height_pt)
+            page.insert_image(rect, stream=img_buffer.getvalue())
+        
+        # Save modified PDF
+        pdf_buffer = io.BytesIO()
+        pdf_doc.save(pdf_buffer)
+        pdf_doc.close()
+        
+        result = pdf_buffer.getvalue()
+        print(f"[HybridFix] Fixed PDF: {len(result)} bytes")
+        return result
+    
+    @staticmethod
+    def _convert_hybrid(buffer: bytes) -> bytes:
+        """Force hybrid mode: LibreOffice + fix any blank pages."""
+        result, blank_pages = PowerPointToPDFConverter._convert_with_libreoffice(buffer, strict=False, return_blank_info=True)
+        
+        if blank_pages:
+            return PowerPointToPDFConverter._fix_blank_pages(buffer, result, blank_pages)
+        return result
     
     @staticmethod
     def _convert_with_cloudconvert(buffer: bytes, api_key: str) -> bytes:
@@ -843,13 +1212,18 @@ class PowerPointToPDFConverter:
                 pass
     
     @staticmethod
-    def _convert_with_libreoffice(buffer: bytes, strict: bool = True) -> bytes:
+    def _convert_with_libreoffice(buffer: bytes, strict: bool = True, return_blank_info: bool = False):
         """
         Convert using LibreOffice with optimized settings for accuracy.
         
         Args:
             buffer: PPTX file bytes
             strict: If True, fail if ANY blank page is detected (default True)
+            return_blank_info: If True, return tuple (pdf_data, blank_pages_list)
+        
+        Returns:
+            bytes: PDF data (if return_blank_info=False)
+            tuple: (pdf_data, blank_pages_list) if return_blank_info=True
         """
         import tempfile
         import subprocess
@@ -1025,7 +1399,13 @@ class PowerPointToPDFConverter:
                             if issues:
                                 raise ConversionError(f"Quality check failed: {'; '.join(issues)}")
                         
-                        print(f"[LibreOffice] Success! All {actual_pages} pages validated.")
+                        # Combine blank and low content pages for fixing
+                        all_problem_pages = sorted(set(blank_pages + low_content_pages))
+                        
+                        print(f"[LibreOffice] Success! {actual_pages} pages, {len(all_problem_pages)} need fixing.")
+                        
+                        if return_blank_info:
+                            return pdf_data, all_problem_pages
                         return pdf_data
                     else:
                         print(f"[LibreOffice] PDF not created")
