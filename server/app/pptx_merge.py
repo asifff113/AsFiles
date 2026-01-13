@@ -5,30 +5,35 @@ import os
 import tempfile
 import zipfile
 import shutil
+import re
 from copy import deepcopy
-from typing import Iterable, List
-from xml.etree import ElementTree as ET
+from typing import Iterable, List, Dict, Set
+from lxml import etree as ET
 
 from pptx import Presentation
 from pptx.util import Emu
 from pptx.enum.shapes import MSO_SHAPE_TYPE
-from pptx.oxml.ns import qn
 
 
 class MergeError(Exception):
     pass
 
 
+# XML namespaces used in PPTX
+NAMESPACES = {
+    'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
+    'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+    'p': 'http://schemas.openxmlformats.org/presentationml/2006/main',
+    'ct': 'http://schemas.openxmlformats.org/package/2006/content-types',
+    'pr': 'http://schemas.openxmlformats.org/package/2006/relationships',
+}
+
+
 def merge_presentations(buffers: Iterable[bytes]) -> bytes:
     """
     Merge multiple PPTX files into one, preserving all content.
     
-    This implementation properly handles:
-    - Slide backgrounds
-    - Images (both as shapes and embedded in other elements)
-    - Tables, charts, SmartArt
-    - Grouped shapes
-    - Slide layouts and themes (from first presentation)
+    Uses a clean ZIP-level merge with proper relationship handling.
     """
     payloads = list(buffers)
     if not payloads:
@@ -37,184 +42,337 @@ def merge_presentations(buffers: Iterable[bytes]) -> bytes:
     if len(payloads) == 1:
         return payloads[0]
     
-    # Use the low-level approach: manipulate PPTX as ZIP files
-    # This preserves all relationships and embedded content
     try:
-        return _merge_via_zip(payloads)
+        result = _merge_pptx_clean(payloads)
+        # Validate and repair the result
+        result = _validate_and_repair_pptx(result)
+        return result
     except Exception as e:
-        print(f"[PPTX Merge] ZIP merge failed: {e}, trying python-pptx method...")
-        # Fallback to improved python-pptx method
-        return _merge_via_pptx(payloads)
+        print(f"[PPTX Merge] Clean merge failed: {e}")
+        raise MergeError(f"Merge failed: {e}")
 
 
-def _merge_via_zip(payloads: List[bytes]) -> bytes:
+def _merge_pptx_clean(payloads: List[bytes]) -> bytes:
     """
-    Merge PPTX files by directly manipulating the ZIP/XML structure.
-    This preserves all content including backgrounds, images, etc.
+    Clean PPTX merge that properly handles all relationships.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Extract first presentation as base
+        # Extract base presentation
         base_dir = os.path.join(tmpdir, 'base')
         with zipfile.ZipFile(io.BytesIO(payloads[0]), 'r') as zf:
             zf.extractall(base_dir)
         
-        # Parse the base presentation.xml to get slide count
-        pres_xml_path = os.path.join(base_dir, 'ppt', 'presentation.xml')
-        ET.register_namespace('', 'http://schemas.openxmlformats.org/presentationml/2006/main')
-        ET.register_namespace('a', 'http://schemas.openxmlformats.org/drawingml/2006/main')
-        ET.register_namespace('r', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships')
-        ET.register_namespace('p', 'http://schemas.openxmlformats.org/presentationml/2006/main')
+        # Track what we have in base
+        base_media = _get_media_files(base_dir)
+        base_slide_count = _count_slides(base_dir)
         
-        tree = ET.parse(pres_xml_path)
-        root = tree.getroot()
+        # Get max IDs from base
+        max_slide_id, max_rid = _get_max_ids(base_dir)
         
-        # Find sldIdLst element
-        ns = {'p': 'http://schemas.openxmlformats.org/presentationml/2006/main'}
-        sld_id_lst = root.find('.//p:sldIdLst', ns)
-        if sld_id_lst is None:
-            # Create it if it doesn't exist
-            sld_id_lst = ET.SubElement(root, '{http://schemas.openxmlformats.org/presentationml/2006/main}sldIdLst')
+        print(f"[PPTX Merge] Base has {base_slide_count} slides, max_slide_id={max_slide_id}, max_rid={max_rid}")
         
-        # Get current max slide ID and relationship ID
-        current_slide_ids = [int(sld.get('id', 256)) for sld in sld_id_lst.findall('p:sldId', ns)]
-        max_slide_id = max(current_slide_ids) if current_slide_ids else 255
-        
-        # Parse relationships
-        rels_path = os.path.join(base_dir, 'ppt', '_rels', 'presentation.xml.rels')
-        rels_tree = ET.parse(rels_path)
-        rels_root = rels_tree.getroot()
-        
-        # Get current max rId
-        current_rids = []
-        for rel in rels_root.findall('.//{http://schemas.openxmlformats.org/package/2006/relationships}Relationship'):
-            rid = rel.get('Id', 'rId0')
-            if rid.startswith('rId'):
-                try:
-                    current_rids.append(int(rid[3:]))
-                except:
-                    pass
-        max_rid = max(current_rids) if current_rids else 0
-        
-        # Count existing slides in base
-        slides_dir = os.path.join(base_dir, 'ppt', 'slides')
-        existing_slides = [f for f in os.listdir(slides_dir) if f.startswith('slide') and f.endswith('.xml')]
-        next_slide_num = len(existing_slides) + 1
+        next_slide_num = base_slide_count + 1
         
         # Process each additional presentation
-        for idx, payload in enumerate(payloads[1:], start=2):
-            src_dir = os.path.join(tmpdir, f'src_{idx}')
+        for pptx_idx, payload in enumerate(payloads[1:], start=2):
+            src_dir = os.path.join(tmpdir, f'src_{pptx_idx}')
             with zipfile.ZipFile(io.BytesIO(payload), 'r') as zf:
                 zf.extractall(src_dir)
             
-            src_slides_dir = os.path.join(src_dir, 'ppt', 'slides')
-            if not os.path.exists(src_slides_dir):
-                continue
+            src_slides = _get_slide_files(src_dir)
+            print(f"[PPTX Merge] Adding {len(src_slides)} slides from presentation {pptx_idx}")
             
-            src_slides = sorted([f for f in os.listdir(src_slides_dir) if f.startswith('slide') and f.endswith('.xml')])
-            
-            for src_slide_file in src_slides:
-                # Copy slide XML
+            for src_slide_name in src_slides:
+                # Map old media references to new ones
+                media_map = {}
+                
+                # Copy slide's media files first
+                src_slide_rels = _get_slide_relationships(src_dir, src_slide_name)
+                for rel_id, rel_info in src_slide_rels.items():
+                    if rel_info['type'] == 'image' or rel_info['type'] == 'media':
+                        src_media_path = os.path.join(src_dir, 'ppt', 'slides', rel_info['target'].lstrip('../'))
+                        if not os.path.exists(src_media_path):
+                            src_media_path = os.path.join(src_dir, 'ppt', rel_info['target'].lstrip('../'))
+                        
+                        if os.path.exists(src_media_path):
+                            media_filename = os.path.basename(src_media_path)
+                            new_media_name = _copy_media_file(src_media_path, base_dir, base_media, pptx_idx, next_slide_num)
+                            media_map[rel_info['target']] = f'../media/{new_media_name}'
+                            base_media.add(new_media_name)
+                
+                # Copy and update slide XML
                 new_slide_name = f'slide{next_slide_num}.xml'
-                src_slide_path = os.path.join(src_slides_dir, src_slide_file)
-                dst_slide_path = os.path.join(slides_dir, new_slide_name)
-                shutil.copy2(src_slide_path, dst_slide_path)
+                _copy_slide(src_dir, base_dir, src_slide_name, new_slide_name, media_map)
                 
-                # Copy slide relationships
-                src_rels_dir = os.path.join(src_slides_dir, '_rels')
-                dst_rels_dir = os.path.join(slides_dir, '_rels')
-                os.makedirs(dst_rels_dir, exist_ok=True)
+                # Copy and update slide relationships
+                _copy_slide_rels(src_dir, base_dir, src_slide_name, new_slide_name, media_map)
                 
-                src_slide_rels = os.path.join(src_rels_dir, f'{src_slide_file}.rels')
-                if os.path.exists(src_slide_rels):
-                    dst_slide_rels = os.path.join(dst_rels_dir, f'{new_slide_name}.rels')
-                    
-                    # Parse and update relationships, copying media files
-                    slide_rels_tree = ET.parse(src_slide_rels)
-                    slide_rels_root = slide_rels_tree.getroot()
-                    
-                    for rel in slide_rels_root.findall('.//{http://schemas.openxmlformats.org/package/2006/relationships}Relationship'):
-                        target = rel.get('Target', '')
-                        rel_type = rel.get('Type', '')
-                        
-                        # Handle media files (images, etc.)
-                        if '../media/' in target or 'media/' in target:
-                            media_filename = os.path.basename(target)
-                            src_media = os.path.join(src_dir, 'ppt', 'media', media_filename)
-                            dst_media_dir = os.path.join(base_dir, 'ppt', 'media')
-                            os.makedirs(dst_media_dir, exist_ok=True)
-                            
-                            # Check if file already exists with same name
-                            dst_media = os.path.join(dst_media_dir, media_filename)
-                            if os.path.exists(src_media):
-                                # If file exists, create unique name
-                                if os.path.exists(dst_media):
-                                    base_name, ext = os.path.splitext(media_filename)
-                                    new_media_name = f'{base_name}_{idx}_{next_slide_num}{ext}'
-                                    dst_media = os.path.join(dst_media_dir, new_media_name)
-                                    rel.set('Target', f'../media/{new_media_name}')
-                                shutil.copy2(src_media, dst_media)
-                                
-                                # Update Content_Types.xml if needed
-                                _update_content_types(base_dir, os.path.basename(dst_media))
-                        
-                        # Handle slide layouts
-                        elif '../slideLayouts/' in target:
-                            # Keep reference but we'll use base layout
-                            # This is simplified - complex merges may need layout copying
-                            pass
-                    
-                    slide_rels_tree.write(dst_slide_rels, xml_declaration=True, encoding='UTF-8')
-                
-                # Add slide to presentation.xml
+                # Add slide to presentation.xml and relationships
                 max_slide_id += 1
                 max_rid += 1
-                new_rid = f'rId{max_rid}'
-                
-                # Add sldId entry
-                sld_id = ET.SubElement(sld_id_lst, '{http://schemas.openxmlformats.org/presentationml/2006/main}sldId')
-                sld_id.set('id', str(max_slide_id))
-                sld_id.set('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id', new_rid)
-                
-                # Add relationship entry
-                rel_elem = ET.SubElement(rels_root, '{http://schemas.openxmlformats.org/package/2006/relationships}Relationship')
-                rel_elem.set('Id', new_rid)
-                rel_elem.set('Type', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide')
-                rel_elem.set('Target', f'slides/{new_slide_name}')
+                _add_slide_to_presentation(base_dir, new_slide_name, max_slide_id, max_rid)
                 
                 # Update Content_Types.xml
                 _add_slide_content_type(base_dir, new_slide_name)
                 
                 next_slide_num += 1
         
-        # Save modified XML files
-        tree.write(pres_xml_path, xml_declaration=True, encoding='UTF-8')
-        rels_tree.write(rels_path, xml_declaration=True, encoding='UTF-8')
-        
         # Repack as PPTX
-        output = io.BytesIO()
-        with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for root_dir, dirs, files in os.walk(base_dir):
-                for file in files:
-                    file_path = os.path.join(root_dir, file)
-                    arc_name = os.path.relpath(file_path, base_dir)
-                    zf.write(file_path, arc_name)
-        
-        return output.getvalue()
+        return _repack_pptx(base_dir)
 
 
-def _update_content_types(base_dir: str, media_filename: str):
-    """Update [Content_Types].xml with media file type if needed."""
-    content_types_path = os.path.join(base_dir, '[Content_Types].xml')
-    if not os.path.exists(content_types_path):
+def _get_media_files(base_dir: str) -> Set[str]:
+    """Get set of media filenames in the presentation."""
+    media_dir = os.path.join(base_dir, 'ppt', 'media')
+    if not os.path.exists(media_dir):
+        return set()
+    return set(os.listdir(media_dir))
+
+
+def _count_slides(base_dir: str) -> int:
+    """Count slides in the presentation."""
+    slides_dir = os.path.join(base_dir, 'ppt', 'slides')
+    if not os.path.exists(slides_dir):
+        return 0
+    return len([f for f in os.listdir(slides_dir) if f.startswith('slide') and f.endswith('.xml')])
+
+
+def _get_slide_files(src_dir: str) -> List[str]:
+    """Get sorted list of slide filenames."""
+    slides_dir = os.path.join(src_dir, 'ppt', 'slides')
+    if not os.path.exists(slides_dir):
+        return []
+    slides = [f for f in os.listdir(slides_dir) if f.startswith('slide') and f.endswith('.xml')]
+    # Sort by slide number
+    slides.sort(key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 0)
+    return slides
+
+
+def _get_max_ids(base_dir: str) -> tuple:
+    """Get maximum slide ID and relationship ID from base presentation."""
+    max_slide_id = 255
+    max_rid = 0
+    
+    # Parse presentation.xml for slide IDs
+    pres_path = os.path.join(base_dir, 'ppt', 'presentation.xml')
+    if os.path.exists(pres_path):
+        try:
+            tree = ET.parse(pres_path)
+            for sld_id in tree.findall('.//p:sldId', NAMESPACES):
+                sid = sld_id.get('id')
+                if sid:
+                    max_slide_id = max(max_slide_id, int(sid))
+        except:
+            pass
+    
+    # Parse relationships for rIds
+    rels_path = os.path.join(base_dir, 'ppt', '_rels', 'presentation.xml.rels')
+    if os.path.exists(rels_path):
+        try:
+            tree = ET.parse(rels_path)
+            for rel in tree.findall('.//pr:Relationship', NAMESPACES):
+                rid = rel.get('Id', '')
+                if rid.startswith('rId'):
+                    try:
+                        max_rid = max(max_rid, int(rid[3:]))
+                    except:
+                        pass
+        except:
+            pass
+    
+    return max_slide_id, max_rid
+
+
+def _get_slide_relationships(src_dir: str, slide_name: str) -> Dict:
+    """Get relationships for a slide."""
+    rels = {}
+    rels_path = os.path.join(src_dir, 'ppt', 'slides', '_rels', f'{slide_name}.rels')
+    
+    if not os.path.exists(rels_path):
+        return rels
+    
+    try:
+        tree = ET.parse(rels_path)
+        for rel in tree.findall('.//pr:Relationship', NAMESPACES):
+            rel_id = rel.get('Id')
+            rel_type = rel.get('Type', '')
+            target = rel.get('Target', '')
+            
+            # Categorize relationship type
+            if 'image' in rel_type or '/media/' in target:
+                type_cat = 'image'
+            elif 'slideLayout' in rel_type:
+                type_cat = 'layout'
+            elif 'media' in rel_type:
+                type_cat = 'media'
+            else:
+                type_cat = 'other'
+            
+            rels[rel_id] = {
+                'type': type_cat,
+                'full_type': rel_type,
+                'target': target
+            }
+    except:
+        pass
+    
+    return rels
+
+
+def _copy_media_file(src_path: str, base_dir: str, existing_media: Set[str], pptx_idx: int, slide_num: int) -> str:
+    """Copy media file to base, handling name collisions."""
+    media_dir = os.path.join(base_dir, 'ppt', 'media')
+    os.makedirs(media_dir, exist_ok=True)
+    
+    filename = os.path.basename(src_path)
+    base_name, ext = os.path.splitext(filename)
+    
+    # If file exists, create unique name
+    new_name = filename
+    if filename in existing_media:
+        new_name = f'{base_name}_p{pptx_idx}_s{slide_num}{ext}'
+    
+    dst_path = os.path.join(media_dir, new_name)
+    shutil.copy2(src_path, dst_path)
+    
+    # Update Content_Types if needed
+    _ensure_media_content_type(base_dir, ext.lower().lstrip('.'))
+    
+    return new_name
+
+
+def _copy_slide(src_dir: str, base_dir: str, src_slide_name: str, new_slide_name: str, media_map: Dict) -> None:
+    """Copy slide XML, updating media references."""
+    src_path = os.path.join(src_dir, 'ppt', 'slides', src_slide_name)
+    dst_path = os.path.join(base_dir, 'ppt', 'slides', new_slide_name)
+    
+    # Just copy the file - relationships handle the media refs
+    shutil.copy2(src_path, dst_path)
+
+
+def _copy_slide_rels(src_dir: str, base_dir: str, src_slide_name: str, new_slide_name: str, media_map: Dict) -> None:
+    """Copy slide relationships, updating media references."""
+    src_rels_path = os.path.join(src_dir, 'ppt', 'slides', '_rels', f'{src_slide_name}.rels')
+    dst_rels_dir = os.path.join(base_dir, 'ppt', 'slides', '_rels')
+    os.makedirs(dst_rels_dir, exist_ok=True)
+    dst_rels_path = os.path.join(dst_rels_dir, f'{new_slide_name}.rels')
+    
+    if not os.path.exists(src_rels_path):
+        # Create minimal rels file pointing to first layout
+        _create_minimal_slide_rels(base_dir, dst_rels_path)
         return
     
-    tree = ET.parse(content_types_path)
+    try:
+        tree = ET.parse(src_rels_path)
+        root = tree.getroot()
+        
+        for rel in root.findall('.//pr:Relationship', NAMESPACES):
+            target = rel.get('Target', '')
+            rel_type = rel.get('Type', '')
+            
+            # Update media references
+            if target in media_map:
+                rel.set('Target', media_map[target])
+            
+            # Update slideLayout references to use base layout
+            if 'slideLayout' in rel_type:
+                # Point to layout1 in base (usually blank or basic)
+                rel.set('Target', '../slideLayouts/slideLayout1.xml')
+        
+        tree.write(dst_rels_path, xml_declaration=True, encoding='UTF-8', standalone=True)
+    except Exception as e:
+        print(f"[PPTX Merge] Error copying rels: {e}")
+        shutil.copy2(src_rels_path, dst_rels_path)
+
+
+def _create_minimal_slide_rels(base_dir: str, rels_path: str) -> None:
+    """Create minimal slide relationships file."""
+    content = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+    <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+</Relationships>'''
+    with open(rels_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+
+def _add_slide_to_presentation(base_dir: str, slide_name: str, slide_id: int, rid: int) -> None:
+    """Add slide reference to presentation.xml and relationships."""
+    # Update presentation.xml
+    pres_path = os.path.join(base_dir, 'ppt', 'presentation.xml')
+    
+    # Parse with lxml, preserving namespaces
+    parser = ET.XMLParser(remove_blank_text=True)
+    tree = ET.parse(pres_path, parser)
     root = tree.getroot()
     
-    # Get extension
-    ext = os.path.splitext(media_filename)[1].lower().lstrip('.')
+    # Define namespace map from root
+    nsmap = root.nsmap.copy()
+    if None in nsmap:
+        nsmap['p'] = nsmap.pop(None)
     
-    # Map extension to content type
+    # Find or create sldIdLst
+    sld_id_lst = root.find('.//p:sldIdLst', nsmap)
+    if sld_id_lst is None:
+        # Find the position to insert (after sldMasterIdLst)
+        sld_master_lst = root.find('.//p:sldMasterIdLst', nsmap)
+        if sld_master_lst is not None:
+            idx = list(root).index(sld_master_lst) + 1
+            sld_id_lst = ET.Element('{http://schemas.openxmlformats.org/presentationml/2006/main}sldIdLst')
+            root.insert(idx, sld_id_lst)
+        else:
+            sld_id_lst = ET.SubElement(root, '{http://schemas.openxmlformats.org/presentationml/2006/main}sldIdLst')
+    
+    # Add slide ID element
+    sld_id = ET.SubElement(sld_id_lst, '{http://schemas.openxmlformats.org/presentationml/2006/main}sldId')
+    sld_id.set('id', str(slide_id))
+    sld_id.set('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id', f'rId{rid}')
+    
+    # Write back
+    tree.write(pres_path, xml_declaration=True, encoding='UTF-8', standalone=True)
+    
+    # Update relationships
+    rels_path = os.path.join(base_dir, 'ppt', '_rels', 'presentation.xml.rels')
+    rels_tree = ET.parse(rels_path, parser)
+    rels_root = rels_tree.getroot()
+    
+    rel = ET.SubElement(rels_root, '{http://schemas.openxmlformats.org/package/2006/relationships}Relationship')
+    rel.set('Id', f'rId{rid}')
+    rel.set('Type', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide')
+    rel.set('Target', f'slides/{slide_name}')
+    
+    rels_tree.write(rels_path, xml_declaration=True, encoding='UTF-8', standalone=True)
+
+
+def _add_slide_content_type(base_dir: str, slide_name: str) -> None:
+    """Add slide to [Content_Types].xml."""
+    ct_path = os.path.join(base_dir, '[Content_Types].xml')
+    
+    parser = ET.XMLParser(remove_blank_text=True)
+    tree = ET.parse(ct_path, parser)
+    root = tree.getroot()
+    
+    # Check if already exists
+    part_name = f'/ppt/slides/{slide_name}'
+    for override in root.findall('.//ct:Override', NAMESPACES):
+        if override.get('PartName') == part_name:
+            return  # Already exists
+    
+    # Also check without namespace prefix
+    for override in root.iter():
+        if 'Override' in override.tag and override.get('PartName') == part_name:
+            return
+    
+    override = ET.SubElement(root, '{http://schemas.openxmlformats.org/package/2006/content-types}Override')
+    override.set('PartName', part_name)
+    override.set('ContentType', 'application/vnd.openxmlformats-officedocument.presentationml.slide+xml')
+    
+    tree.write(ct_path, xml_declaration=True, encoding='UTF-8', standalone=True)
+
+
+def _ensure_media_content_type(base_dir: str, ext: str) -> None:
+    """Ensure media extension is in Content_Types.xml."""
+    ct_path = os.path.join(base_dir, '[Content_Types].xml')
+    
     ext_map = {
         'png': 'image/png',
         'jpg': 'image/jpeg',
@@ -231,246 +389,49 @@ def _update_content_types(base_dir: str, media_filename: str):
     if ext not in ext_map:
         return
     
-    content_type = ext_map[ext]
-    
-    # Check if extension already registered
-    ns = {'ct': 'http://schemas.openxmlformats.org/package/2006/content-types'}
-    for default in root.findall('ct:Default', ns):
-        if default.get('Extension', '').lower() == ext:
-            return  # Already registered
-    
-    # Add new Default entry
-    default = ET.SubElement(root, '{http://schemas.openxmlformats.org/package/2006/content-types}Default')
-    default.set('Extension', ext)
-    default.set('ContentType', content_type)
-    
-    tree.write(content_types_path, xml_declaration=True, encoding='UTF-8')
-
-
-def _add_slide_content_type(base_dir: str, slide_name: str):
-    """Add slide to [Content_Types].xml."""
-    content_types_path = os.path.join(base_dir, '[Content_Types].xml')
-    if not os.path.exists(content_types_path):
-        return
-    
-    tree = ET.parse(content_types_path)
+    parser = ET.XMLParser(remove_blank_text=True)
+    tree = ET.parse(ct_path, parser)
     root = tree.getroot()
     
-    # Add Override for the new slide
-    override = ET.SubElement(root, '{http://schemas.openxmlformats.org/package/2006/content-types}Override')
-    override.set('PartName', f'/ppt/slides/{slide_name}')
-    override.set('ContentType', 'application/vnd.openxmlformats-officedocument.presentationml.slide+xml')
+    # Check if extension already registered
+    for default in root.iter():
+        if 'Default' in default.tag and default.get('Extension', '').lower() == ext:
+            return
     
-    tree.write(content_types_path, xml_declaration=True, encoding='UTF-8')
+    default = ET.SubElement(root, '{http://schemas.openxmlformats.org/package/2006/content-types}Default')
+    default.set('Extension', ext)
+    default.set('ContentType', ext_map[ext])
+    
+    tree.write(ct_path, xml_declaration=True, encoding='UTF-8', standalone=True)
 
 
-def _merge_via_pptx(payloads: List[bytes]) -> bytes:
-    """
-    Fallback merge using python-pptx with improved shape copying.
-    """
-    base = Presentation(io.BytesIO(payloads[0]))
-    
-    for payload in payloads[1:]:
-        source = Presentation(io.BytesIO(payload))
-        
-        for slide in source.slides:
-            _append_slide_improved(base, slide, source)
-    
+def _repack_pptx(base_dir: str) -> bytes:
+    """Repack directory as PPTX file."""
     output = io.BytesIO()
-    base.save(output)
+    with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for root, dirs, files in os.walk(base_dir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                arc_name = os.path.relpath(file_path, base_dir)
+                zf.write(file_path, arc_name)
     return output.getvalue()
 
 
-def _append_slide_improved(target: Presentation, slide, source: Presentation) -> None:
+def _validate_and_repair_pptx(pptx_bytes: bytes) -> bytes:
     """
-    Improved slide appending that better preserves content.
+    Validate and repair PPTX using python-pptx.
+    Opening and saving with python-pptx often fixes minor XML issues.
     """
-    # Try to find a matching layout or use blank
-    layout = _find_best_layout(target, slide)
-    new_slide = target.slides.add_slide(layout)
-    
-    # Copy slide background
     try:
-        _copy_background(slide, new_slide)
-    except Exception as e:
-        print(f"[PPTX Merge] Could not copy background: {e}")
-    
-    # Copy all shapes
-    for shape in slide.shapes:
-        try:
-            _copy_shape_improved(shape, new_slide, slide, source)
-        except Exception as e:
-            print(f"[PPTX Merge] Could not copy shape: {e}")
-            # Try basic copy as fallback
-            try:
-                if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
-                    _copy_picture(shape, new_slide)
-                else:
-                    new_element = deepcopy(shape.element)
-                    new_slide.shapes._spTree.insert_element_before(new_element, "p:extLst")
-            except:
-                pass
-
-
-def _find_best_layout(target: Presentation, slide) -> 'SlideLayout':
-    """Find the best matching layout in target presentation."""
-    # Try to get a blank layout (usually index 6)
-    try:
-        if len(target.slide_layouts) > 6:
-            return target.slide_layouts[6]  # Blank
-    except:
-        pass
-    
-    # Otherwise use the last layout
-    return target.slide_layouts[-1]
-
-
-def _copy_background(source_slide, target_slide) -> None:
-    """Copy slide background from source to target."""
-    src_bg = source_slide.background
-    tgt_bg = target_slide.background
-    
-    if src_bg is None or src_bg.fill is None:
-        return
-    
-    src_fill = src_bg.fill
-    tgt_fill = tgt_bg.fill
-    
-    # Copy fill type and properties
-    if src_fill.type is not None:
-        try:
-            # Solid fill
-            if hasattr(src_fill, 'fore_color') and src_fill.fore_color:
-                tgt_fill.solid()
-                if src_fill.fore_color.rgb:
-                    tgt_fill.fore_color.rgb = src_fill.fore_color.rgb
-        except:
-            pass
-
-
-def _copy_shape_improved(shape, new_slide, source_slide, source_prs) -> None:
-    """
-    Improved shape copying that handles more shape types.
-    """
-    shape_type = shape.shape_type
-    
-    # Handle pictures
-    if shape_type == MSO_SHAPE_TYPE.PICTURE:
-        _copy_picture(shape, new_slide)
-        return
-    
-    # Handle tables
-    if shape_type == MSO_SHAPE_TYPE.TABLE:
-        _copy_table(shape, new_slide)
-        return
-    
-    # Handle groups
-    if shape_type == MSO_SHAPE_TYPE.GROUP:
-        _copy_group(shape, new_slide, source_slide, source_prs)
-        return
-    
-    # Handle text boxes and other shapes
-    try:
-        # Deep copy the shape element
-        new_element = deepcopy(shape.element)
-        new_slide.shapes._spTree.insert_element_before(new_element, "p:extLst")
+        # Open with python-pptx - this validates and normalizes the file
+        prs = Presentation(io.BytesIO(pptx_bytes))
         
-        # If shape has an image fill, we need to handle it separately
-        if hasattr(shape, 'fill') and shape.fill:
-            try:
-                fill = shape.fill
-                if fill.type is not None and hasattr(fill, '_fill'):
-                    # Check for blip (image) fill
-                    blip = fill._fill.find('.//{http://schemas.openxmlformats.org/drawingml/2006/main}blip')
-                    if blip is not None:
-                        # Image fill - need to copy the image
-                        _copy_shape_with_image_fill(shape, new_slide)
-            except:
-                pass
-    except Exception as e:
-        print(f"[PPTX Merge] Basic shape copy failed: {e}")
-
-
-def _copy_picture(shape, new_slide) -> None:
-    """Copy a picture shape."""
-    try:
-        image_blob = shape.image.blob
-        new_slide.shapes.add_picture(
-            io.BytesIO(image_blob),
-            shape.left,
-            shape.top,
-            shape.width,
-            shape.height,
-        )
-    except Exception as e:
-        print(f"[PPTX Merge] Picture copy failed: {e}")
-
-
-def _copy_table(shape, new_slide) -> None:
-    """Copy a table shape."""
-    try:
-        table = shape.table
-        rows = len(table.rows)
-        cols = len(table.columns)
+        # Save back - python-pptx will write clean XML
+        output = io.BytesIO()
+        prs.save(output)
         
-        # Create new table
-        new_table_shape = new_slide.shapes.add_table(
-            rows, cols,
-            shape.left, shape.top,
-            shape.width, shape.height
-        )
-        new_table = new_table_shape.table
-        
-        # Copy cell contents
-        for row_idx in range(rows):
-            for col_idx in range(cols):
-                src_cell = table.cell(row_idx, col_idx)
-                dst_cell = new_table.cell(row_idx, col_idx)
-                
-                # Copy text
-                if src_cell.text_frame:
-                    dst_cell.text = src_cell.text
-                    
-                    # Try to copy formatting
-                    try:
-                        for src_para, dst_para in zip(src_cell.text_frame.paragraphs, 
-                                                       dst_cell.text_frame.paragraphs):
-                            for src_run, dst_run in zip(src_para.runs, dst_para.runs):
-                                if src_run.font.bold is not None:
-                                    dst_run.font.bold = src_run.font.bold
-                                if src_run.font.size:
-                                    dst_run.font.size = src_run.font.size
-                    except:
-                        pass
+        print("[PPTX Merge] Validation/repair completed successfully")
+        return output.getvalue()
     except Exception as e:
-        print(f"[PPTX Merge] Table copy failed: {e}")
-        # Fallback to element copy
-        new_element = deepcopy(shape.element)
-        new_slide.shapes._spTree.insert_element_before(new_element, "p:extLst")
-
-
-def _copy_group(shape, new_slide, source_slide, source_prs) -> None:
-    """Copy a group of shapes."""
-    try:
-        # For groups, deep copy the entire element
-        new_element = deepcopy(shape.element)
-        new_slide.shapes._spTree.insert_element_before(new_element, "p:extLst")
-        
-        # Also copy any images in the group
-        for child_shape in shape.shapes:
-            if child_shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
-                try:
-                    _copy_picture(child_shape, new_slide)
-                except:
-                    pass
-    except Exception as e:
-        print(f"[PPTX Merge] Group copy failed: {e}")
-
-
-def _copy_shape_with_image_fill(shape, new_slide) -> None:
-    """Copy a shape that has an image fill."""
-    try:
-        new_element = deepcopy(shape.element)
-        new_slide.shapes._spTree.insert_element_before(new_element, "p:extLst")
-    except Exception as e:
-        print(f"[PPTX Merge] Shape with image fill copy failed: {e}")
+        print(f"[PPTX Merge] Validation failed: {e}, returning original")
+        return pptx_bytes
