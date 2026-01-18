@@ -35,8 +35,8 @@ EXPOSE 8080
 ENV MALLOC_ARENA_MAX=2
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
-# Force CloudConvert for PPTX→PDF (LibreOffice not installed)
-ENV PPTX_CONVERT_METHOD=cloudconvert
+# Use pure Python slide renderer (no LibreOffice needed, unlimited & free)
+ENV PPTX_CONVERT_METHOD=sliderender
 # Disable pyppeteer auto-download
 ENV PYPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 
