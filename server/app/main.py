@@ -6,6 +6,7 @@ Handles all document transformations including PDF, Word, Excel, PowerPoint, and
 from __future__ import annotations
 
 import io
+import gc
 import asyncio
 from typing import List, Optional, Literal
 from pathlib import Path
@@ -13,6 +14,10 @@ from pathlib import Path
 # Load environment variables from .env file
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
+
+# Maximum file size: 25MB (Railway free tier has limited memory)
+MAX_FILE_SIZE = 25 * 1024 * 1024  # 25MB
+MAX_TOTAL_SIZE = 50 * 1024 * 1024  # 50MB for multiple files
 
 import fitz  # PyMuPDF
 
@@ -96,6 +101,52 @@ app.add_middleware(
 
 
 # =============================================================================
+# Helper Functions for Memory Management
+# =============================================================================
+
+async def validate_file_size(upload: UploadFile, max_size: int = MAX_FILE_SIZE) -> bytes:
+    """Read and validate file size to prevent OOM."""
+    content = await upload.read()
+    if len(content) > max_size:
+        raise HTTPException(
+            status_code=413, 
+            detail=f"File too large: {len(content) / (1024*1024):.1f}MB. Maximum allowed: {max_size / (1024*1024):.0f}MB"
+        )
+    return content
+
+
+async def validate_multiple_files(uploads: List[UploadFile], max_total: int = MAX_TOTAL_SIZE) -> list[bytes]:
+    """Read and validate multiple files with total size limit."""
+    payloads = []
+    total_size = 0
+    
+    for upload in uploads:
+        content = await upload.read()
+        total_size += len(content)
+        
+        if len(content) > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File '{upload.filename}' too large: {len(content) / (1024*1024):.1f}MB. Maximum: {MAX_FILE_SIZE / (1024*1024):.0f}MB"
+            )
+        
+        if total_size > max_total:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Total upload size exceeds {max_total / (1024*1024):.0f}MB limit"
+            )
+        
+        payloads.append(content)
+    
+    return payloads
+
+
+def cleanup_memory():
+    """Force garbage collection to free memory."""
+    gc.collect()
+
+
+# =============================================================================
 # Health & Status
 # =============================================================================
 
@@ -127,12 +178,17 @@ async def merge_pptx(files: List[UploadFile] = File(...)):
     if len(files) < 2:
         raise HTTPException(status_code=400, detail="Add at least two PPTX files.")
 
-    payloads: list[bytes] = []
+    # Validate file types
     for upload in files:
         filename = (upload.filename or "").lower()
         if not filename.endswith(".pptx"):
             raise HTTPException(status_code=400, detail=f"Unsupported file: {upload.filename}")
-        payloads.append(await upload.read())
+    
+    # Validate and read files with size limits
+    try:
+        payloads = await validate_multiple_files(files)
+    except HTTPException:
+        raise
 
     try:
         merged = merge_presentations(payloads)
@@ -140,6 +196,8 @@ async def merge_pptx(files: List[UploadFile] = File(...)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Merge failed.") from exc
+    finally:
+        cleanup_memory()
 
     headers = {"Content-Disposition": "attachment; filename=merged.pptx"}
     return StreamingResponse(
@@ -159,12 +217,17 @@ async def merge_pdf(files: List[UploadFile] = File(...)):
     if len(files) < 2:
         raise HTTPException(status_code=400, detail="Add at least two PDF files.")
     
-    payloads: list[bytes] = []
+    # Validate file types
     for upload in files:
         filename = (upload.filename or "").lower()
         if not filename.endswith(".pdf"):
             raise HTTPException(status_code=400, detail=f"Unsupported file: {upload.filename}")
-        payloads.append(await upload.read())
+    
+    # Validate and read files with size limits
+    try:
+        payloads = await validate_multiple_files(files)
+    except HTTPException:
+        raise
     
     try:
         merged = PDFMerger.merge(payloads)
@@ -172,6 +235,8 @@ async def merge_pdf(files: List[UploadFile] = File(...)):
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Merge failed.")
+    finally:
+        cleanup_memory()
     
     headers = {"Content-Disposition": "attachment; filename=merged.pdf"}
     return StreamingResponse(
@@ -222,12 +287,16 @@ async def split_pdf_range(
         raise HTTPException(status_code=400, detail="File must be a PDF")
     
     try:
-        buffer = await file.read()
+        buffer = await validate_file_size(file)
         result = PDFSplitter.split_range(buffer, start - 1, end)  # Convert to 0-indexed
+    except HTTPException:
+        raise
     except PDFError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Split failed.")
+    finally:
+        cleanup_memory()
     
     headers = {"Content-Disposition": "attachment; filename=split.pdf"}
     return StreamingResponse(
@@ -260,12 +329,16 @@ async def compress_pdf(
         mode = "smart"
     
     try:
-        buffer = await file.read()
+        buffer = await validate_file_size(file)
         result = PDFCompressor.compress(buffer, compression_level, mode)
+    except HTTPException:
+        raise
     except PDFError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Compression failed.")
+    finally:
+        cleanup_memory()
     
     headers = {"Content-Disposition": "attachment; filename=compressed.pdf"}
     return StreamingResponse(

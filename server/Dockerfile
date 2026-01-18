@@ -1,44 +1,29 @@
 FROM python:3.11-slim
 
-# Install LibreOffice, Chromium, lxml dependencies, and fonts for proper rendering
+# Lightweight deployment without LibreOffice (saves ~600MB RAM)
+# PPTX→PDF will use CloudConvert API or slide rendering instead
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libreoffice-writer \
-    libreoffice-impress \
-    libreoffice-calc \
-    chromium \
-    chromium-driver \
-    # lxml dependencies
+    # lxml dependencies (required for XML processing)
     libxml2-dev \
     libxslt1-dev \
-    # Fonts for proper text rendering in LibreOffice
+    # Poppler for pdf2image (PDF rendering)
+    poppler-utils \
+    # Basic fonts
     fonts-liberation \
-    fonts-liberation2 \
-    fonts-dejavu \
     fonts-dejavu-core \
-    fonts-freefont-ttf \
-    fonts-noto \
-    fonts-noto-core \
-    fonts-noto-cjk \
-    fonts-crosextra-carlito \
-    fonts-crosextra-caladea \
     fontconfig \
-    # Accept EULA for MS fonts
-    && echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | debconf-set-selections \
-    && apt-get install -y --no-install-recommends ttf-mscorefonts-installer || true \
-    && fc-cache -f -v \
+    # Clean up aggressively
     && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# Set Chromium path for pyppeteer
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-ENV PYPPETEER_CHROMIUM_REVISION=1
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
+    && rm -rf /usr/share/doc /usr/share/man
 
 # Set working directory
 WORKDIR /app
 
-# Copy requirements and install
+# Copy requirements and install with optimizations
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && rm -rf ~/.cache/pip /root/.cache
 
 # Copy app code
 COPY . .
@@ -46,5 +31,16 @@ COPY . .
 # Use fixed port 8080 (Railway will map it)
 EXPOSE 8080
 
-# Start server on port 8080
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+# Memory-efficient environment variables
+ENV MALLOC_ARENA_MAX=2
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+# Force CloudConvert for PPTX→PDF (LibreOffice not installed)
+ENV PPTX_CONVERT_METHOD=cloudconvert
+# Disable pyppeteer auto-download
+ENV PYPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+
+# Start server with memory management
+# --workers 1: Single worker to reduce memory
+# --limit-max-requests 50: Restart worker after 50 requests to prevent memory leaks
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--limit-max-requests", "50"]

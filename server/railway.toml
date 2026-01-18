@@ -4,6 +4,9 @@
 
 [deploy]
   healthcheckPath = "/"
+  healthcheckTimeout = 30
+  restartPolicyType = "on_failure"
+  restartPolicyMaxRetries = 5
 
 [[services]]
   name = "asfiles-api"
