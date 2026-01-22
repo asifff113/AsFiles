@@ -3,8 +3,9 @@ services:
     name: asfiles-backend
     runtime: python
     buildCommand: |
-      apt-get update && apt-get install -y libreoffice-writer libreoffice-impress libreoffice-calc --no-install-recommends
+      apt-get update && apt-get install -y poppler-utils fonts-liberation fonts-dejavu-core --no-install-recommends
       pip install -r requirements.txt
+      python -c "from rembg import new_session; new_session('u2net')" || true
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION

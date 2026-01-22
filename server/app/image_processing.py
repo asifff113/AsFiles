@@ -6,9 +6,20 @@ Handles image editing operations including resize, rotate, blur, background remo
 from __future__ import annotations
 
 import io
+import gc
 from typing import Literal, Optional
 from PIL import Image, ImageFilter, ImageEnhance
 import numpy as np
+
+# Try to import rembg for AI-powered background removal
+try:
+    from rembg import remove as rembg_remove, new_session
+    REMBG_AVAILABLE = True
+    # Create session once to avoid repeated model loading
+    _rembg_session = None
+except ImportError:
+    REMBG_AVAILABLE = False
+    _rembg_session = None
 
 
 class ImageError(Exception):
@@ -159,7 +170,61 @@ class ImageProcessor:
     
     @staticmethod
     def _remove_background(img: Image.Image) -> Image.Image:
-        """Remove background using color detection (simple method)."""
+        """Remove background using AI-powered rembg library."""
+        global _rembg_session
+        
+        # Use rembg for AI-powered background removal
+        if REMBG_AVAILABLE:
+            try:
+                # Resize large images to reduce memory usage (max 1500px)
+                max_size = 1500
+                original_size = img.size
+                if img.width > max_size or img.height > max_size:
+                    ratio = min(max_size / img.width, max_size / img.height)
+                    new_size = (int(img.width * ratio), int(img.height * ratio))
+                    img_to_process = img.resize(new_size, Image.Resampling.LANCZOS)
+                else:
+                    img_to_process = img
+                
+                # Convert image to bytes for rembg
+                img_byte_arr = io.BytesIO()
+                # Ensure we save in a format rembg can process
+                if img_to_process.mode in ("RGBA", "LA"):
+                    img_to_process.save(img_byte_arr, format='PNG')
+                else:
+                    img_to_process.convert("RGB").save(img_byte_arr, format='PNG')
+                img_byte_arr.seek(0)
+                
+                # Initialize session lazily (only when first needed)
+                if _rembg_session is None:
+                    _rembg_session = new_session("u2net")
+                
+                # Remove background using AI with session
+                output_bytes = rembg_remove(img_byte_arr.getvalue(), session=_rembg_session)
+                
+                # Convert back to PIL Image
+                result = Image.open(io.BytesIO(output_bytes))
+                
+                # If we resized, scale the result back to original size
+                if img_to_process.size != original_size:
+                    result = result.resize(original_size, Image.Resampling.LANCZOS)
+                
+                # Force garbage collection to free memory
+                gc.collect()
+                
+                return result.convert("RGBA")
+            except Exception as e:
+                # Fall back to simple method if rembg fails
+                print(f"rembg failed, falling back to simple method: {e}")
+                gc.collect()
+                return ImageProcessor._remove_background_simple(img)
+        else:
+            # Fall back to simple color-based method
+            return ImageProcessor._remove_background_simple(img)
+    
+    @staticmethod
+    def _remove_background_simple(img: Image.Image) -> Image.Image:
+        """Remove background using simple color detection (fallback method)."""
         # Convert to RGBA if needed
         if img.mode != "RGBA":
             img = img.convert("RGBA")

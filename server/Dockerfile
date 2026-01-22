@@ -25,6 +25,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && rm -rf ~/.cache/pip /root/.cache
 
+# Pre-download rembg model during build to avoid runtime download
+# This caches the U2-Net model in the image
+RUN python -c "from rembg import new_session; new_session('u2net')" || true
+
 # Copy app code
 COPY . .
 
