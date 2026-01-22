@@ -1,0 +1,39 @@
+# Fly.io Configuration for AsFiles API
+# Free tier: 3 shared-cpu-1x VMs with 256MB RAM
+
+app = "asfiles-api"
+primary_region = "iad"  # US East (change to your preferred region)
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  PYTHONUNBUFFERED = "1"
+  PYTHONDONTWRITEBYTECODE = "1"
+  MALLOC_ARENA_MAX = "2"
+  PPTX_CONVERT_METHOD = "sliderender"
+  PYPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false  # Keep always on (free tier allows this)
+  auto_start_machines = true
+  min_machines_running = 1    # Always keep 1 machine running
+  processes = ["app"]
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[checks]
+  [checks.health]
+    grace_period = "30s"
+    interval = "30s"
+    method = "GET"
+    path = "/"
+    port = 8080
+    timeout = "10s"
+    type = "http"

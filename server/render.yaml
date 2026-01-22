@@ -5,12 +5,13 @@ services:
     buildCommand: |
       apt-get update && apt-get install -y poppler-utils fonts-liberation fonts-dejavu-core --no-install-recommends
       pip install -r requirements.txt
-      python -c "from rembg import new_session; new_session('u2net')" || true
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.4
       - key: GROQ_API_KEY
+        sync: false
+      - key: REMOVEBG_API_KEY
         sync: false
     healthCheckPath: /
     autoDeploy: true

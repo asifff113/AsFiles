@@ -6,20 +6,15 @@ Handles image editing operations including resize, rotate, blur, background remo
 from __future__ import annotations
 
 import io
+import os
 import gc
 from typing import Literal, Optional
 from PIL import Image, ImageFilter, ImageEnhance
 import numpy as np
+import requests
 
-# Try to import rembg for AI-powered background removal
-try:
-    from rembg import remove as rembg_remove, new_session
-    REMBG_AVAILABLE = True
-    # Create session once to avoid repeated model loading
-    _rembg_session = None
-except ImportError:
-    REMBG_AVAILABLE = False
-    _rembg_session = None
+# Remove.bg API key (50 free removals/month)
+REMOVEBG_API_KEY = os.getenv("REMOVEBG_API_KEY", "")
 
 
 class ImageError(Exception):
@@ -170,56 +165,46 @@ class ImageProcessor:
     
     @staticmethod
     def _remove_background(img: Image.Image) -> Image.Image:
-        """Remove background using AI-powered rembg library."""
-        global _rembg_session
+        """Remove background using remove.bg API (50 free/month)."""
         
-        # Use rembg for AI-powered background removal
-        if REMBG_AVAILABLE:
+        # Use remove.bg API if key is available
+        if REMOVEBG_API_KEY:
             try:
-                # Resize large images to reduce memory usage (max 1500px)
-                max_size = 1500
-                original_size = img.size
-                if img.width > max_size or img.height > max_size:
-                    ratio = min(max_size / img.width, max_size / img.height)
-                    new_size = (int(img.width * ratio), int(img.height * ratio))
-                    img_to_process = img.resize(new_size, Image.Resampling.LANCZOS)
-                else:
-                    img_to_process = img
-                
-                # Convert image to bytes for rembg
+                # Convert image to bytes
                 img_byte_arr = io.BytesIO()
-                # Ensure we save in a format rembg can process
-                if img_to_process.mode in ("RGBA", "LA"):
-                    img_to_process.save(img_byte_arr, format='PNG')
+                if img.mode in ("RGBA", "LA"):
+                    img.save(img_byte_arr, format='PNG')
                 else:
-                    img_to_process.convert("RGB").save(img_byte_arr, format='PNG')
-                img_byte_arr.seek(0)
+                    img.convert("RGB").save(img_byte_arr, format='PNG')
+                img_bytes = img_byte_arr.getvalue()
                 
-                # Initialize session lazily (only when first needed)
-                if _rembg_session is None:
-                    _rembg_session = new_session("u2net")
+                # Call remove.bg API
+                response = requests.post(
+                    "https://api.remove.bg/v1.0/removebg",
+                    files={"image_file": ("image.png", img_bytes, "image/png")},
+                    data={"size": "auto"},
+                    headers={"X-Api-Key": REMOVEBG_API_KEY},
+                    timeout=60
+                )
                 
-                # Remove background using AI with session
-                output_bytes = rembg_remove(img_byte_arr.getvalue(), session=_rembg_session)
-                
-                # Convert back to PIL Image
-                result = Image.open(io.BytesIO(output_bytes))
-                
-                # If we resized, scale the result back to original size
-                if img_to_process.size != original_size:
-                    result = result.resize(original_size, Image.Resampling.LANCZOS)
-                
-                # Force garbage collection to free memory
-                gc.collect()
-                
-                return result.convert("RGBA")
+                if response.status_code == 200:
+                    # Success - return the image with background removed
+                    result = Image.open(io.BytesIO(response.content))
+                    gc.collect()
+                    return result.convert("RGBA")
+                elif response.status_code == 402:
+                    # Out of free credits
+                    print("remove.bg: Out of free credits, falling back to simple method")
+                    return ImageProcessor._remove_background_simple(img)
+                else:
+                    print(f"remove.bg API error {response.status_code}: {response.text}")
+                    return ImageProcessor._remove_background_simple(img)
+                    
             except Exception as e:
-                # Fall back to simple method if rembg fails
-                print(f"rembg failed, falling back to simple method: {e}")
-                gc.collect()
+                print(f"remove.bg failed: {e}")
                 return ImageProcessor._remove_background_simple(img)
         else:
-            # Fall back to simple color-based method
+            # No API key, use simple method
             return ImageProcessor._remove_background_simple(img)
     
     @staticmethod

@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
-# Lightweight deployment without LibreOffice (saves ~600MB RAM)
-# PPTX→PDF will use CloudConvert API or slide rendering instead
+# Lightweight deployment for Fly.io free tier (256MB)
+# Using remove.bg API for background removal instead of heavy rembg
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # lxml dependencies (required for XML processing)
     libxml2-dev \
@@ -25,14 +25,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && rm -rf ~/.cache/pip /root/.cache
 
-# Pre-download rembg model during build to avoid runtime download
-# This caches the U2-Net model in the image
-RUN python -c "from rembg import new_session; new_session('u2net')" || true
-
 # Copy app code
 COPY . .
 
-# Use fixed port 8080 (Railway will map it)
+# Use fixed port 8080
 EXPOSE 8080
 
 # Memory-efficient environment variables
@@ -46,5 +42,5 @@ ENV PYPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 
 # Start server with memory management
 # --workers 1: Single worker to reduce memory
-# --limit-max-requests 50: Restart worker after 50 requests to prevent memory leaks
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--limit-max-requests", "50"]
+# --limit-max-requests 100: Restart worker periodically to prevent memory leaks
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--limit-max-requests", "100"]
