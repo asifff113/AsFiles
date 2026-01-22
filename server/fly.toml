@@ -1,8 +1,8 @@
 # Fly.io Configuration for AsFiles API
 # Free tier: 3 shared-cpu-1x VMs with 256MB RAM
 
-app = "asfiles-api"
-primary_region = "iad"  # US East (change to your preferred region)
+app = "asfiles"
+primary_region = "ams"  # Amsterdam (matching your selection)
 
 [build]
   dockerfile = "Dockerfile"
