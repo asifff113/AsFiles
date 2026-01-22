@@ -21,7 +21,7 @@ MAX_TOTAL_SIZE = 50 * 1024 * 1024  # 50MB for multiple files
 
 import fitz  # PyMuPDF
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, Form, Query
+from fastapi import FastAPI, File, HTTPException, UploadFile, Form, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
@@ -101,6 +101,25 @@ app.add_middleware(
 
 
 # =============================================================================
+# Middleware for Memory Cleanup
+# =============================================================================
+
+@app.middleware("http")
+async def cleanup_after_request(request: Request, call_next):
+    """
+    Middleware to clean up memory after every request.
+    This ensures uploaded files and processed data are garbage collected.
+    """
+    response = await call_next(request)
+    
+    # Force garbage collection after file processing endpoints
+    if request.url.path.startswith("/api/"):
+        gc.collect()
+    
+    return response
+
+
+# =============================================================================
 # Helper Functions for Memory Management
 # =============================================================================
 
@@ -112,6 +131,8 @@ async def validate_file_size(upload: UploadFile, max_size: int = MAX_FILE_SIZE) 
             status_code=413, 
             detail=f"File too large: {len(content) / (1024*1024):.1f}MB. Maximum allowed: {max_size / (1024*1024):.0f}MB"
         )
+    # Close the file to free resources
+    await upload.close()
     return content
 
 
@@ -125,18 +146,26 @@ async def validate_multiple_files(uploads: List[UploadFile], max_total: int = MA
         total_size += len(content)
         
         if len(content) > MAX_FILE_SIZE:
+            # Close all files before raising
+            for u in uploads:
+                await u.close()
             raise HTTPException(
                 status_code=413,
                 detail=f"File '{upload.filename}' too large: {len(content) / (1024*1024):.1f}MB. Maximum: {MAX_FILE_SIZE / (1024*1024):.0f}MB"
             )
         
         if total_size > max_total:
+            # Close all files before raising
+            for u in uploads:
+                await u.close()
             raise HTTPException(
                 status_code=413,
                 detail=f"Total upload size exceeds {max_total / (1024*1024):.0f}MB limit"
             )
         
         payloads.append(content)
+        # Close file immediately after reading
+        await upload.close()
     
     return payloads
 
@@ -144,6 +173,19 @@ async def validate_multiple_files(uploads: List[UploadFile], max_total: int = MA
 def cleanup_memory():
     """Force garbage collection to free memory."""
     gc.collect()
+
+
+async def read_and_close_file(upload: UploadFile, max_size: int = MAX_FILE_SIZE) -> bytes:
+    """Read file content, validate size, and close the file to free resources."""
+    content = await upload.read()
+    await upload.close()  # Close immediately after reading
+    
+    if len(content) > max_size:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large: {len(content) / (1024*1024):.1f}MB. Maximum: {max_size / (1024*1024):.0f}MB"
+        )
+    return content
 
 
 # =============================================================================
